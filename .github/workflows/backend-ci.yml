@@ -1,0 +1,82 @@
+name: backend-ci
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+jobs:
+  lint:
+    name: Lint（black / isort / flake8）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lint tools
+        run: pip install black isort flake8
+      - name: Run linters
+        working-directory: backend
+        run: |
+          black --check app tests scripts
+          isort --check-only app tests
+          flake8 app
+
+  unit:
+    name: Unit tests（无服务依赖，快速反馈）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Run unit tests
+        working-directory: backend
+        # 覆盖率门槛在 integration job（全量含集成）上强制；单测 job 仅做快速回归
+        run: pytest -m "not integration" -o addopts="-q"
+
+  integration:
+    name: Full tests + coverage gate（真实 Postgres / pgvector）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: english_edit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/english_edit_test
+      # interrupt 恢复在同进程内验证（PostgresSaver 降级逻辑由单测覆盖）
+      CHECKPOINTER_BACKEND: memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Run full test suite（覆盖率门槛 80% 强制）
+        working-directory: backend
+        # 门槛必须显式传参：addopts 只有 --cov=app --cov-report（审查 P0-B 修复，
+        # 此前 cov-fail-under 仅存在于注释，覆盖率跌破 80% CI 仍会绿）
+        run: pytest --cov-fail-under=80
