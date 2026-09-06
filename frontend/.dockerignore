@@ -1,0 +1,6 @@
+# .dockerignore —— 构建镜像时排除的文件
+node_modules
+dist
+npm-debug.log*
+.git
+*.md
