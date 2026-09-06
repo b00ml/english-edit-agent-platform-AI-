@@ -1,0 +1,142 @@
+# docker-compose.yml —— 英语教研 AI 内容生成平台全栈编排
+# 服务：postgres / redis / langfuse / backend / worker / frontend
+# 说明：从项目根运行 `docker compose -f deploy/docker-compose.yml up`，
+#       插值 ${VAR} 会读取项目根目录的 .env 文件作为配置来源。
+networks:
+  english-edit-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  langfuse-data:
+
+services:
+  # 主数据库（pgvector 提供向量检索能力）
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: english-edit-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: english_edit
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - english-edit-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # 不对外暴露端口，仅内部互联
+
+  # 缓存 / 消息队列
+  redis:
+    image: redis:7
+    container_name: english-edit-redis
+    networks:
+      - english-edit-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # 不对外暴露端口
+
+  # 可观测性平台（Langfuse 自建）
+  langfuse:
+    # 固定 v2 主版本标签：v3 需要额外 ClickHouse/Redis/S3，超出当前 compose 范围
+    image: langfuse/langfuse:2
+    container_name: english-edit-langfuse
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: change-me-langfuse-secret
+      SALT: change-me-langfuse-salt
+      ENCRYPTION_KEY: change-me-langfuse-encryption-key
+      NODE_ENV: production
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - english-edit-net
+    volumes:
+      - langfuse-data:/app/data
+
+  # 后端 API
+  backend:
+    build:
+      context: ../backend
+    container_name: english-edit-backend
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/english_edit
+      REDIS_URL: redis://redis:6379/0
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.deepseek.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-v4-flash}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://ws-66wjvfashe900u6x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-text-embedding-v3}
+      JWT_SECRET: ${JWT_SECRET:-change-me-english-edit-jwt-secret}
+      JWT_EXPIRE_SECONDS: ${JWT_EXPIRE_SECONDS:-43200}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin123}
+      SEED_ADMIN_DISPLAY_NAME: ${SEED_ADMIN_DISPLAY_NAME:-系统管理员}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - english-edit-net
+
+  # Celery Worker（与 backend 共享同一镜像，仅启动命令不同）
+  worker:
+    build:
+      context: ../backend
+    container_name: english-edit-worker
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/english_edit
+      REDIS_URL: redis://redis:6379/0
+      LLM_API_BASE: ${LLM_API_BASE:-https://api.deepseek.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-v4-flash}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://ws-66wjvfashe900u6x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-text-embedding-v3}
+      JWT_SECRET: ${JWT_SECRET:-change-me-english-edit-jwt-secret}
+      JWT_EXPIRE_SECONDS: ${JWT_EXPIRE_SECONDS:-43200}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin123}
+      SEED_ADMIN_DISPLAY_NAME: ${SEED_ADMIN_DISPLAY_NAME:-系统管理员}
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=5"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - english-edit-net
+
+  # 前端工作台
+  frontend:
+    build:
+      context: ../frontend
+    container_name: english-edit-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - english-edit-net
