@@ -1,0 +1,5 @@
+# flake8 配置：与 black 共存（E203 为 black 有意为之的切片空格风格，标准豁免项）
+[flake8]
+max-line-length = 100
+extend-ignore = E203
+exclude = .venv,__pycache__,alembic/versions

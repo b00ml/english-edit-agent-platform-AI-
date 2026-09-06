@@ -1,0 +1,7 @@
+# 英语教研 AI 内容生成平台 2.0 —— 开发/测试依赖
+pytest
+pytest-cov
+httpx
+black
+isort
+flake8
