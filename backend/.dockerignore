@@ -1,0 +1,10 @@
+# backend/.dockerignore —— 排除不进入镜像的文件
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.log
+.env
+install.log
+import_check.txt
