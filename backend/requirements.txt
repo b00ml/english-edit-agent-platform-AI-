@@ -1,0 +1,25 @@
+# 英语教研 AI 内容生成平台 2.0 —— 生产依赖
+fastapi
+python-multipart
+uvicorn[standard]
+sqlalchemy>=2.0
+alembic
+pydantic>=2.0
+pydantic-settings
+psycopg2-binary
+redis
+celery
+langgraph
+langgraph-checkpoint-postgres
+psycopg[binary]
+langchain-openai
+# openai 与 httpx>=0.28 的兼容下限（更低版本向 httpx 传已移除的 proxies 参数）
+openai>=1.55.3
+langfuse
+pyyaml
+pgvector
+python-docx
+pypdf
+PyJWT
+passlib[bcrypt]
+bcrypt==4.2.1

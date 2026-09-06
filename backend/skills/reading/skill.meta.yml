@@ -1,0 +1,7 @@
+displayName: 阅读理解命制
+display:
+  icon: 阅读
+categories:
+  - key: READING
+    label: 阅读理解
+    priority: CORE

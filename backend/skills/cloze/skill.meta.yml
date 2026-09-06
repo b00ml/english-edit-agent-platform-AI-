@@ -1,0 +1,7 @@
+displayName: 完形填空命制
+display:
+  icon: 完形
+categories:
+  - key: CLOZE
+    label: 完形填空
+    priority: CORE

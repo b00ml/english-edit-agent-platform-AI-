@@ -1,0 +1,7 @@
+displayName: 通用出题
+display:
+  icon: 出题
+categories:
+  - key: GENERAL
+    label: 通用出题
+    priority: NORMAL

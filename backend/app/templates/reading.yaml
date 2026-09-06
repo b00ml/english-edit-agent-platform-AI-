@@ -1,0 +1,74 @@
+type_id: reading
+name: 阅读理解
+version: 1
+input_schema:
+  type: object
+  properties:
+    knowledge_point: {type: string}
+    difficulty: {type: string, enum: [易, 中, 难]}
+    quantity: {type: integer, minimum: 1, maximum: 50}
+    topic: {type: string}
+  required: [knowledge_point, difficulty, quantity]
+output_schema:
+  type: object
+  required: [passage, questions]
+  properties:
+    passage:
+      type: string
+    questions:
+      type: array
+      items:
+        type: object
+        required: [stem, options, answer, explanation]
+        properties:
+          stem:
+            type: string
+          options:
+            type: array
+            items: {type: string}
+          answer: {type: string, enum: [A, B, C, D]}
+          explanation: {type: string}
+quality_rules:
+  - id: passage_intelligibility
+    weight: 0.25
+    description: 语篇可读性、连贯性与语言质量
+    rubric:
+      "90-100": 语篇通顺连贯、难度恰当、无语言错误
+      "70-89": 整体可读，个别语句或衔接可优化
+      "40-69": 存在明显语法或用词问题，连贯性受损
+      "0-39": 语篇难以理解，语言错误严重
+  - id: question_alignment
+    weight: 0.3
+    description: 设问是否与语篇内容及目标知识点对齐
+    rubric:
+      "90-100": 设问紧密依托语篇，精准覆盖目标知识点
+      "70-89": 基本对齐，个别题目关联度可提升
+      "40-69": 部分设问与语篇脱节或偏离知识点
+      "0-39": 设问与语篇无关，或无法依据语篇作答
+  - id: option_validity
+    weight: 0.25
+    description: 选项有效性（唯一性、干扰项质量）
+    rubric:
+      "90-100": 答案唯一，干扰项合理且有迷惑性
+      "70-89": 大部分选项合格，个别可改进
+      "40-69": 存在明显歧义或多解，干扰项敷衍
+      "0-39": 选项无效、缺失或答案不唯一
+  - id: answer_correctness
+    weight: 0.2
+    description: 设问答案的正确性与解析质量
+    rubric:
+      "90-100": 答案正确，解析准确充分
+      "70-89": 答案正确，解析可更详尽
+      "40-69": 答案基本正确但存在争议，或解析薄弱
+      "0-39": 答案错误或无法从语篇得出
+gen_prompt:
+  system: prompts/reading-system.st
+  user: prompts/reading-user.st
+run_config:
+  # 按难度分档路由：阅读为复杂题型，默认走 standard，难题升级到 high 高性能模型
+  model_profile:
+    default: standard
+    hard: high
+  max_retry: 3
+  max_revise: 3
+  quality_threshold: 70

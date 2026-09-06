@@ -1,0 +1,72 @@
+type_id: cloze
+name: 完形填空
+version: 1
+input_schema:
+  type: object
+  properties:
+    knowledge_point: {type: string}
+    difficulty: {type: string, enum: [易, 中, 难]}
+    quantity: {type: integer, minimum: 1, maximum: 50}
+  required: [knowledge_point, difficulty, quantity]
+output_schema:
+  type: object
+  required: [passage, blanks]
+  properties:
+    passage:
+      type: string
+    blanks:
+      type: array
+      items:
+        type: object
+        required: [index, answer, options, explanation]
+        properties:
+          index: {type: integer}
+          answer: {type: string}
+          options:
+            type: array
+            items: {type: string}
+          explanation: {type: string}
+quality_rules:
+  - id: context_coherence
+    weight: 0.3
+    description: 填空处与上下文语境的连贯一致性
+    rubric:
+      "90-100": 空格处与前后文语义连贯、逻辑自洽
+      "70-89": 基本连贯，个别填空衔接可优化
+      "40-69": 多处填空与语境脱节，或逻辑不通
+      "0-39": 填空与上下文不连贯，语义混乱
+  - id: option_validity
+    weight: 0.3
+    description: 选项有效性（每空选项唯一、干扰项合理）
+    rubric:
+      "90-100": 每空答案唯一，干扰项合理、有迷惑性
+      "70-89": 大部分选项合格，个别可改进
+      "40-69": 存在明显歧义或多解，干扰项敷衍
+      "0-39": 选项无效、缺失或答案不唯一
+  - id: answer_correctness
+    weight: 0.25
+    description: 填空答案正确性与解析质量
+    rubric:
+      "90-100": 答案正确，解析准确充分
+      "70-89": 答案正确，解析可更详尽
+      "40-69": 答案基本正确但存在争议，或解析薄弱
+      "0-39": 答案错误或语法不当
+  - id: difficulty_match
+    weight: 0.15
+    description: 整体难度是否符合指定档位
+    rubric:
+      "90-100": 难度精确匹配指定档位
+      "70-89": 基本匹配，略有偏差
+      "40-69": 明显偏离指定难度
+      "0-39": 难度严重不符
+gen_prompt:
+  system: prompts/cloze-system.st
+  user: prompts/cloze-user.st
+run_config:
+  # 按难度分档路由：完形为中等题型，默认走 standard，难题升级到 high
+  model_profile:
+    default: standard
+    hard: high
+  max_retry: 3
+  max_revise: 3
+  quality_threshold: 70

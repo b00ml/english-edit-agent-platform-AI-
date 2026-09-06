@@ -1,0 +1,7 @@
+displayName: LLM-as-judge 质检
+display:
+  icon: 质检
+categories:
+  - key: QUALITY
+    label: 质检
+    priority: CORE

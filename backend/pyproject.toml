@@ -1,0 +1,61 @@
+[project]
+name = "english-edit-backend"
+version = "2.0.0"
+description = "英语教研 AI 内容生成平台 2.0 后端服务"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy>=2.0",
+    "alembic",
+    "pydantic>=2.0",
+    "psycopg2-binary",
+    "redis",
+    "celery",
+    "langgraph",
+    "langchain-openai",
+    "langfuse",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "httpx",
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+    "pydantic-settings",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+# ---------------------------------------------------------------------------
+# 代码规范工具链配置
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+files = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=app --cov-report=term-missing"
+# 覆盖率门槛 80% 在 CI 的 integration job 上强制：pytest --cov-fail-under=80
+# （全量含集成测试才可达标；纯单测运行不应被门槛误伤）
+markers = [
+    "integration: 需要真实 Postgres 的集成测试（设 TEST_DATABASE_URL 后运行 tests/integration）",
+]

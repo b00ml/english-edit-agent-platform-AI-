@@ -1,0 +1,66 @@
+type_id: single_choice
+name: 单项选择
+version: 1
+input_schema:
+  type: object
+  properties:
+    knowledge_point: {type: string}
+    difficulty: {type: string, enum: [易, 中, 难]}
+    quantity: {type: integer, minimum: 1, maximum: 50}
+  required: [knowledge_point, difficulty, quantity]
+output_schema:
+  type: object
+  required: [stem, options, answer, explanation]
+  properties:
+    stem: {type: string}
+    options:
+      type: array
+      items: {type: string}
+      minItems: 4
+      maxItems: 4
+    answer: {type: string, enum: [A, B, C, D]}
+    explanation: {type: string}
+quality_rules:
+  - id: kp_match
+    weight: 0.3
+    description: 题干与正确选项是否精准匹配目标知识点
+    rubric:
+      "90-100": 题干与答案精准命中知识点，逻辑严密、无歧义
+      "70-89": 基本命中该知识点，个别表述可更精确
+      "40-69": 部分匹配，存在明显偏差或混入其他知识点
+      "0-39": 知识点不匹配，或答案与题干明显不符
+  - id: diff_match
+    weight: 0.2
+    description: 题目难度是否符合指定档位（易/中/难）
+    rubric:
+      "90-100": 难度精确匹配指定档位，无明显偏差
+      "70-89": 基本匹配，略有偏差但不影响区分度
+      "40-69": 明显偏离指定难度（偏易或偏难一档以上）
+      "0-39": 难度严重不符，无法区分
+  - id: distractor
+    weight: 0.3
+    description: 干扰项质量（真实性、迷惑性、与正确项长度相近）
+    rubric:
+      "90-100": 干扰项真实合理、有迷惑性、长度与正确项相近
+      "70-89": 大部分干扰项合理，个别可改进
+      "40-69": 干扰项明显不合格（如语法错误、过短、显然荒谬）
+      "0-39": 干扰项无效或缺失
+  - id: unambiguous
+    weight: 0.2
+    description: 题干与选项表述是否唯一、无歧义
+    rubric:
+      "90-100": 题意唯一，不存在二义性或多解
+      "70-89": 基本无歧义，个别措辞可优化
+      "40-69": 存在明显歧义，可能多解
+      "0-39": 题意模糊，无法唯一作答
+gen_prompt:
+  system: prompts/single_choice-system.st
+  user: prompts/single_choice-user.st
+run_config:
+  # 按难度分档路由：单选为简单题型，默认走轻量级模型 lite，难题才用 standard
+  model_profile:
+    default: lite
+    hard: standard
+  max_retry: 3
+  max_revise: 3
+  quality_threshold: 70

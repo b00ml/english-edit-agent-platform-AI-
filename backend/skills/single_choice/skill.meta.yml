@@ -1,0 +1,7 @@
+displayName: 单选题命制
+display:
+  icon: 单选
+categories:
+  - key: OPTION
+    label: 选择题
+    priority: CORE
