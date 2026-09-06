@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+
+# 环境变量
+.env
+!.env.example
+
+# 数据库与本地数据
+*.db
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 日志
+*.log
+
+# Langfuse 本地数据
+langfuse-data/
+# 测试与覆盖率产物
+.pytest_cache/
+.coverage
+htmlcov/
