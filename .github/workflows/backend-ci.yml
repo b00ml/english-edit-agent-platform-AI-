@@ -47,6 +47,8 @@ jobs:
   unit:
     name: Unit tests（无服务依赖，快速反馈）
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -99,6 +101,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      PYTHONPATH: .
       TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/english_edit_test
       # interrupt 恢复在同进程内验证（PostgresSaver 降级逻辑由单测覆盖）
       CHECKPOINTER_BACKEND: memory
