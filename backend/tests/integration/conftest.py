@@ -88,8 +88,11 @@ def auth_headers(client):
 @pytest.fixture()
 def inline_celery(monkeypatch):
     """把 celery send_task 替换为进程内同步执行（不依赖 redis）。"""
+    import app.worker.tasks as tasks_module
     from app.api import routes as routes_module
-    from app.worker.tasks import process_generation_task
+
+    process_generation_task = tasks_module.process_generation_task
+    original_generate_single_item = tasks_module.generate_single_item
 
     def _fake_send_task(name, args=None, **kwargs):
         assert name == "app.worker.tasks.process_generation_task"
@@ -103,7 +106,17 @@ def inline_celery(monkeypatch):
         def get(self, timeout=None):
             return self._value
 
+    def _fake_item_delay(task_id, item_index):
+        """让父任务拆出的 item 也在当前进程执行，避免隐式连接真实 broker。"""
+        return original_generate_single_item.apply(args=[task_id, item_index])
+
     monkeypatch.setattr(routes_module.celery_app, "send_task", _fake_send_task)
+
+    class _InlineItemTask:
+        def delay(self, task_id, item_index):
+            return _fake_item_delay(task_id, item_index)
+
+    monkeypatch.setattr(tasks_module, "generate_single_item", _InlineItemTask())
     return _fake_send_task
 
 

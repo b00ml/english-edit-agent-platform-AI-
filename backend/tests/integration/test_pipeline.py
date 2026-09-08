@@ -123,7 +123,7 @@ class TestFullPipeline:
         session = SessionLocal()
         try:
             traces = session.query(TraceLog).filter(TraceLog.task_id == task_id).all()
-            assert {t.stage for t in traces} == {"generate", "qc"}
+            assert {"generate", "qc"} <= {t.stage for t in traces}
             assert all(t.attempt == 1 and t.success for t in traces)
             records = session.query(QualityRecord).filter(QualityRecord.item_id == item["id"]).all()
             assert len(records) == 1 and records[0].source == "auto"

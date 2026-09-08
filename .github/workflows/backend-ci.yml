@@ -111,6 +111,9 @@ jobs:
           cache-dependency-path: backend/requirements*.txt
       - name: Install dependencies
         run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Initialize database schema
+        working-directory: backend
+        run: alembic upgrade head
       - name: Run full test suite（覆盖率门槛 80% 强制）
         working-directory: backend
         # 门槛必须显式传参：addopts 只有 --cov=app --cov-report（审查 P0-B 修复，

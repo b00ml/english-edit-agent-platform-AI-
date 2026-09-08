@@ -31,7 +31,7 @@ class AuthService:
 
         token = create_access_token(user)
         return LoginOut(
-            token=token,
+            access_token=token,
             user=UserOut.model_validate(user),
         )
 
