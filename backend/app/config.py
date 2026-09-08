@@ -3,6 +3,21 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _is_placeholder(value: str) -> bool:
+    """识别示例文件中的空值和显式占位值。"""
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or normalized.startswith("replace-with-")
+        or normalized
+        in {
+            "sk-xxxxxxxx",
+            "your-key",
+            "your-secret",
+        }
+    )
+
+
 class Settings(BaseSettings):
     """应用配置集合。
 
@@ -21,6 +36,8 @@ class Settings(BaseSettings):
     # LangGraph checkpointer 后端：postgres（持久化断点，跨重启续跑）/ memory（进程内）。
     # postgres 初始化失败时自动降级 memory 并告警，保证可用性优先。
     CHECKPOINTER_BACKEND: str = "postgres"
+    # 仅允许在 staging/production 显式放行 MemorySaver 降级；默认保持 not-ready。
+    ALLOW_MEMORY_CHECKPOINTER: bool = False
     # Redis 连接串（数据队列 / Cache）
     REDIS_URL: str = "redis://localhost:6379/0"
 
@@ -62,6 +79,19 @@ class Settings(BaseSettings):
     # running 状态超过该秒数判定为僵尸任务，worker 启动时重置为 pending 并重新入队
     STALE_TASK_SECONDS: int = 1800
 
+    # Outbox relay（数据库事务提交后投递 Celery）
+    OUTBOX_MAX_ATTEMPTS: int = 5
+    OUTBOX_RELAY_BATCH_SIZE: int = 50
+    OUTBOX_RETRY_BACKOFF_SECONDS: int = 5
+    # relay 领取到事件后进程异常时，超过该时间可重新领取；避免 sending 永久滞留。
+    OUTBOX_SENDING_TIMEOUT_SECONDS: int = 300
+
+    # 模型运行时治理（P2-1）；预算为 0 表示不启用全局上限。
+    MODEL_COOLDOWN_SECONDS: int = 60
+    MODEL_FAILURE_THRESHOLD: int = 2
+    MODEL_MAX_FALLBACKS: int = 1
+    MODEL_BUDGET_PER_TASK: float = 0.0
+
     # 成本估算单价（每 1000 token），用于记录 TraceLog.cost
     COST_PER_1K_TOKENS: float = 0.002
 
@@ -72,9 +102,7 @@ class Settings(BaseSettings):
     QUALITY_THRESHOLD: float = 70.0
 
     # RAG 向量检索：OpenAI 兼容 embedding 端点（阿里云百炼 text-embedding-v3）
-    EMBEDDING_API_BASE: str = (
-        "https://ws-66wjvfashe900u6x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-    )
+    EMBEDDING_API_BASE: str = "https://your-embedding-provider.example/v1"
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_MODEL_NAME: str = "text-embedding-v3"
     # 向量维度（与 text-embedding-v3 默认输出一致）
@@ -91,6 +119,26 @@ class Settings(BaseSettings):
     SEED_ADMIN_USERNAME: str = "admin"
     SEED_ADMIN_PASSWORD: str = "admin123"
     SEED_ADMIN_DISPLAY_NAME: str = "系统管理员"
+
+    # 环境标识（P0-5 生产环境 fail-fast）
+    ENVIRONMENT: str = "development"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # P0-5 生产环境强制密钥检查
+        if self.ENVIRONMENT == "production":
+            if self.JWT_SECRET == "change-me-english-edit-jwt-secret" or _is_placeholder(
+                self.JWT_SECRET
+            ):
+                raise ValueError("生产环境必须设置非占位 JWT_SECRET")
+            if len(self.JWT_SECRET.encode("utf-8")) < 32:
+                raise ValueError("生产环境 JWT_SECRET 至少需要 32 字节")
+            if self.SEED_ADMIN_PASSWORD == "admin123" or _is_placeholder(self.SEED_ADMIN_PASSWORD):
+                raise ValueError("生产环境必须设置非占位 SEED_ADMIN_PASSWORD")
+            if _is_placeholder(self.LLM_API_KEY):
+                raise ValueError("生产环境必须设置非占位 LLM_API_KEY")
+            if _is_placeholder(self.EMBEDDING_API_KEY):
+                raise ValueError("生产环境必须设置非占位 EMBEDDING_API_KEY")
 
 
 settings = Settings()

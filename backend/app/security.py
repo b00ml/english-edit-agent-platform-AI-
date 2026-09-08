@@ -35,6 +35,8 @@ ROLE_PERMISSIONS: dict[str, List[str]] = {
     "template:manage": ["admin"],
     # 发起生成
     "generate:create": ["admin", "researcher"],
+    # 取消生成任务
+    "generate:cancel": ["admin", "researcher"],
     # 查看任务 / 内容（已发布内容对查看者开放，见 apply_scope）
     "content:read": ["admin", "researcher", "reviewer", "viewer"],
     # 人工质检标注

@@ -1,10 +1,16 @@
 # app/rag/embedding.py —— 文本向量化
 # 调用 OpenAI 兼容 embedding 端点（阿里云百炼 text-embedding-v3）生成向量。
+import logging
+import time
+import uuid
 from typing import List
 
 from openai import OpenAI
 
 from app.config import settings
+from app.engine.trace import compute_cost, elapsed_ms, record_trace, token_breakdown
+
+logger = logging.getLogger("app.rag.embedding")
 
 
 def _get_openai_client() -> OpenAI:
@@ -16,17 +22,61 @@ def _get_openai_client() -> OpenAI:
     )
 
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
+def embed_texts(
+    texts: List[str],
+    *,
+    trace_id: str | None = None,
+    task_id: str | None = None,
+    template_id: str | None = None,
+    tenant_id: str | None = None,
+) -> List[List[float]]:
     """批量将文本转换为向量（保留输入顺序）。"""
     if not texts:
         return []
+    effective_trace_id = trace_id or f"embedding:{uuid.uuid4()}"
+    started = time.perf_counter_ns()
     client = _get_openai_client()
-    resp = client.embeddings.create(
-        model=settings.EMBEDDING_MODEL_NAME,
-        input=texts,
-    )
+    try:
+        resp = client.embeddings.create(
+            model=settings.EMBEDDING_MODEL_NAME,
+            input=texts,
+        )
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - record provider failure then preserve caller semantics
+        record_trace(
+            trace_id=effective_trace_id,
+            task_id=task_id,
+            template_id=template_id,
+            tenant_id=tenant_id,
+            model=settings.EMBEDDING_MODEL_NAME,
+            latency_ms=elapsed_ms(started),
+            cost=0.0,
+            input_data={"text_count": len(texts)},
+            output_data={"error_summary": str(exc)[:200]},
+            stage="embedding",
+            success=False,
+        )
+        raise
     # 按输入顺序对齐返回的向量
     ordered = [None] * len(texts)
     for item in resp.data:
         ordered[item.index] = item.embedding
-    return [vec for vec in ordered if vec is not None]
+    vectors = [vec for vec in ordered if vec is not None]
+    usage = getattr(resp, "usage", None)
+    tokens = token_breakdown(usage, settings.EMBEDDING_MODEL_NAME)
+    record_trace(
+        trace_id=effective_trace_id,
+        task_id=task_id,
+        template_id=template_id,
+        tenant_id=tenant_id,
+        model=settings.EMBEDDING_MODEL_NAME,
+        latency_ms=elapsed_ms(started),
+        cost=compute_cost(usage, settings.EMBEDDING_MODEL_NAME),
+        input_data={"text_count": len(texts)},
+        output_data={"text_count": len(vectors), "dimension": len(vectors[0]) if vectors else 0},
+        stage="embedding",
+        prompt_tokens=tokens["prompt_tokens"],
+        completion_tokens=tokens["completion_tokens"],
+    )
+    return vectors

@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import jsonschema
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError, create_model
 
@@ -55,32 +56,60 @@ def _build_pydantic_from_schema(schema: Dict[str, Any]) -> Type[BaseModel]:
 
 
 def _map_schema_type(prop: Dict[str, Any]) -> object:
-    """将 JSON Schema 类型映射为 Python 类型标注（支持嵌套对象/数组递归构造）。"""
+    """将 JSON Schema 类型映射为 Python 类型标注（保留约束：enum/minLength/maxLength/minItems/maxItems）。"""
+    from typing import Literal
+
+    from pydantic import conlist, constr
+
     ptype = prop.get("type")
+
     if ptype == "string":
-        # 枚举值用 Literal 约束，String 兜底
+        # 枚举值用 Literal 约束
         enum = prop.get("enum")
         if enum:
-            from typing import Literal
-
             return Literal[tuple(enum)]  # type: ignore[valid-type]
+        # 字符串长度约束
+        min_len = prop.get("minLength")
+        max_len = prop.get("maxLength")
+        if min_len is not None or max_len is not None:
+            return constr(min_length=min_len, max_length=max_len)  # type: ignore[valid-type]
         return str
+
     if ptype == "integer":
         return int
+
     if ptype == "number":
         return float
+
     if ptype == "boolean":
         return bool
+
     if ptype == "array":
-        # 数组元素为对象时递归构造内部模型，保证嵌套字段可被二次校验
         items = prop.get("items")
+        min_items = prop.get("minItems")
+        max_items = prop.get("maxItems")
+
+        # 数组元素为对象时递归构造内部模型
         if isinstance(items, dict) and items.get("type") == "object":
             inner = _build_pydantic_from_schema(items)
+            # 保留数组长度约束
+            if min_items is not None or max_items is not None:
+                return conlist(  # type: ignore[valid-type]
+                    inner, min_length=min_items, max_length=max_items
+                )
             return List[inner]  # type: ignore[name-defined]
+
+        # 普通数组保留长度约束
+        if min_items is not None or max_items is not None:
+            return conlist(  # type: ignore[valid-type]
+                Any, min_length=min_items, max_length=max_items
+            )
         return List[Any]
+
     if ptype == "object":
         # 对象递归构造内部模型
         return _build_pydantic_from_schema(prop)
+
     return Any
 
 
@@ -288,6 +317,13 @@ def generate_structured(
             raw = json.loads(text)
             # 兜底展平偶发嵌套包装后再做 Pydantic 二次校验
             validated = output_model.model_validate(_normalize_flat(schema, raw))
+            # 第二道校验：用 jsonschema 兜底无法转为 Pydantic 的约束
+            validated_dict = validated.model_dump()
+            try:
+                jsonschema.validate(validated_dict, schema)
+            except jsonschema.ValidationError as json_exc:
+                # jsonschema 校验失败，触发重试
+                raise json_exc
         except (ValidationError, json.JSONDecodeError, KeyError) as exc:
             summary = _summarize_validation_error(exc)
             attempt_summaries.append(f"第{attempt}次: {summary}")

@@ -1,6 +1,6 @@
 # frontend/Dockerfile —— 多阶段构建前端
 # 阶段 1：使用 Node 构建静态资源
-FROM node:18-alpine AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
@@ -9,7 +9,7 @@ COPY package.json ./
 COPY package-lock.json* ./
 
 # 安装依赖并构建
-RUN npm ci || npm install
+RUN npm ci
 COPY . .
 RUN npm run build
 

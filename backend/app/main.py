@@ -10,9 +10,11 @@ from app.api.routes import router
 from app.config import settings
 from app.database import SessionLocal, engine
 from app.errors import PlatformError
+from app.model_governance import validate_template_model_references
 from app.models import Base, ModelProfile
 from app.seed import seed_default_admin
 from app.template_loader import load_all_templates
+from app.versioning import ensure_model_profile_hash
 
 logger = logging.getLogger("app.main")
 
@@ -27,15 +29,20 @@ def _seed_model_profiles(session) -> None:
     """若模型档案表为空，则按配置写入默认档案（避免新库无模型可用）。"""
     if session.query(ModelProfile).count() > 0:
         return
-    session.add(
-        ModelProfile(
-            name="standard",
-            provider="deepseek",
+    for name, cost_tier, is_default in (
+        ("lite", "low", False),
+        ("standard", "standard", True),
+        ("high", "high", False),
+    ):
+        profile = ModelProfile(
+            name=name,
+            provider="configured",
             model_name=settings.LLM_MODEL_NAME,
-            cost_tier="standard",
-            is_default=True,
+            cost_tier=cost_tier,
+            is_default=is_default,
         )
-    )
+        ensure_model_profile_hash(profile)
+        session.add(profile)
     session.commit()
 
 
@@ -61,6 +68,15 @@ async def lifespan(app: FastAPI):
         _seed_model_profiles(session)
     except Exception as exc:  # noqa: BLE001
         logger.warning("模型档案种子写入失败: %s", exc)
+    finally:
+        session.close()
+
+    # 模型档案种子完成后再检查模板引用，避免新库首次启动误报缺档。
+    session = SessionLocal()
+    try:
+        reference_errors = validate_template_model_references(session)
+        if reference_errors:
+            raise RuntimeError("; ".join(reference_errors))
     finally:
         session.close()
 

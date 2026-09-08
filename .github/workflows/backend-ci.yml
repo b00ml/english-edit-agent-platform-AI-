@@ -4,10 +4,26 @@ on:
   push:
     paths:
       - "backend/**"
+      - "frontend/**"
+      - "deploy/**"
+      - "docs/**"
+      - "README.md"
+      - "LICENSE"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - ".gitignore"
       - ".github/workflows/backend-ci.yml"
   pull_request:
     paths:
       - "backend/**"
+      - "frontend/**"
+      - "deploy/**"
+      - "docs/**"
+      - "README.md"
+      - "LICENSE"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - ".gitignore"
       - ".github/workflows/backend-ci.yml"
 
 jobs:
@@ -44,6 +60,26 @@ jobs:
         working-directory: backend
         # 覆盖率门槛在 integration job（全量含集成）上强制；单测 job 仅做快速回归
         run: pytest -m "not integration" -o addopts="-q"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Audit dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+      - name: Build
+        working-directory: frontend
+        run: npm run build
 
   integration:
     name: Full tests + coverage gate（真实 Postgres / pgvector）

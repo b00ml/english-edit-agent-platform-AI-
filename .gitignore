@@ -25,6 +25,23 @@ dist-ssr/
 
 # 日志
 *.log
+*.out
+*.err
+*.report
+*.tmp
+*.bak
+*.backup
+*.backup*
+*_backup.py
+*_refactored.py
+*_imports.txt
+refactor_*.py
+*_original.py
+*_step*.py
+remaining_endpoints.txt
+models_patch1.diff
+schemas_cancel.txt
+alembic_*.log
 
 # Langfuse 本地数据
 langfuse-data/
@@ -32,3 +49,9 @@ langfuse-data/
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+
+# 本地虚拟环境与编辑器残留
+backend/.venv/
+frontend/node_modules/
+*.swp

@@ -6,6 +6,7 @@
 import json
 import logging
 import threading
+import time
 from typing import Optional, TypedDict
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -19,11 +20,13 @@ from app.config import settings
 from app.database import SessionLocal
 from app.engine.quality import resolve_judge_model, run_quality_check
 from app.engine.router import generate_with_fallback
+from app.engine.trace import elapsed_ms, record_lifecycle_event
 from app.errors import TemplateNotFoundError
 from app.models import ContentItem, QualityRecord, QuestionTemplate
 from app.notification import notify_content_rejected, notify_human_review
 from app.prompt_loader import load_prompt, render
 from app.rag.retriever import build_rag_context
+from app.versioning import quality_snapshot
 
 logger = logging.getLogger("app.workflow.graph")
 
@@ -51,6 +54,7 @@ class GenState(TypedDict, total=False):
     max_revise: int
     quality_threshold: float
     human_review_config: dict
+    quality_config_snapshot: dict
 
 
 # 全局 checkpointer 单例（惰性初始化）：backend 与 worker 各进程首次调用时构建
@@ -130,7 +134,13 @@ def generate_node(state: GenState, session: Session) -> dict:
     knowledge_point = params.get("knowledge_point") or ""
     if knowledge_point:
         rag_context = build_rag_context(
-            session, query=knowledge_point, knowledge_point=knowledge_point
+            session,
+            query=knowledge_point,
+            knowledge_point=knowledge_point,
+            tenant_id=params.get("tenant_id"),
+            trace_id=state["trace_id"],
+            task_id=state.get("task_id"),
+            template_id=template.type_id,
         )
         if rag_context:
             params["rag_context"] = rag_context
@@ -186,7 +196,7 @@ def qc_node(state: GenState, session: Session) -> dict:
     template = _load_template(session, state["params"]["template_id"])
     draft = state.get("draft") or {}
     # 读取校准覆盖权重（无校准则返回 None，回退模板默认）
-    weights_override, _calib_threshold = get_effective_weights(session, template.type_id)
+    weights_override, calib_threshold = get_effective_weights(session, template.type_id)
     score, dimension_scores = run_quality_check(
         template,
         draft,
@@ -197,7 +207,20 @@ def qc_node(state: GenState, session: Session) -> dict:
         tenant_id=state["params"].get("tenant_id"),
         weights_override=weights_override,
     )
-    return {"qc_score": score, "dimension_scores": dimension_scores, "status": "qc_done"}
+    return {
+        "qc_score": score,
+        "dimension_scores": dimension_scores,
+        "quality_config_snapshot": quality_snapshot(
+            template,
+            model_name=resolve_judge_model(template),
+            threshold=calib_threshold
+            or float(
+                (template.run_config or {}).get("quality_threshold", _DEFAULT_QUALITY_THRESHOLD)
+            ),
+            weights=weights_override,
+        ),
+        "status": "qc_done",
+    }
 
 
 def revise_node(state: GenState, session: Session) -> dict:
@@ -223,6 +246,7 @@ def revise_node(state: GenState, session: Session) -> dict:
 
 def store_node(state: GenState, session: Session) -> dict:
     """入库节点：将通过的草稿写入 ContentItem，并绑定本次质检记录。"""
+    template = _load_template(session, state["params"]["template_id"])
     item = ContentItem(
         task_id=state["task_id"],
         template_id=state["params"]["template_id"],
@@ -240,6 +264,8 @@ def store_node(state: GenState, session: Session) -> dict:
         score=state.get("qc_score", 0.0),
         dimension_scores=state.get("dimension_scores", {}),
         source="auto",
+        template_version=getattr(template, "version", 1),
+        config_snapshot=state.get("quality_config_snapshot"),
     )
     session.add(record)
     session.commit()
@@ -247,8 +273,27 @@ def store_node(state: GenState, session: Session) -> dict:
 
 
 def reject_node(state: GenState, session: Session) -> dict:
-    """拒绝节点：改版次数耗尽且未达标，标记失败。"""
-    return {"status": "rejected"}
+    """拒绝节点：改版次数耗尽且未达标，标记失败，落库 failure_code/failure_reason。"""
+    failure_code = state.get("failure_code", "quality_threshold_not_met")
+    failure_reason = state.get(
+        "failure_reason",
+        f"质检分数 {state.get('qc_score', 0.0)} 低于阈值，已重试 {state.get('revise_count', 0)} 次",
+    )
+
+    item = ContentItem(
+        task_id=state["task_id"],
+        template_id=state["params"]["template_id"],
+        payload=state.get("draft") or {},
+        qc_score=state.get("qc_score"),
+        revise_count=state.get("revise_count", 0),
+        status="rejected",
+        thread_id=state["trace_id"],
+        failure_code=failure_code,
+        failure_reason=failure_reason,
+    )
+    session.add(item)
+    session.commit()
+    return {"content_id": item.id, "status": "rejected", "failure_code": failure_code}
 
 
 def submit_review_node(state: GenState, session: Session) -> dict:
@@ -258,6 +303,7 @@ def submit_review_node(state: GenState, session: Session) -> dict:
     下一个节点（human_review）内 interrupt 暂停不会导致本节点副作用重复执行。
     thread_id 存入条目，供 review API 凭 Command(resume) 恢复图。
     """
+    template = _load_template(session, state["params"]["template_id"])
     item = ContentItem(
         task_id=state["task_id"],
         template_id=state["params"]["template_id"],
@@ -275,6 +321,8 @@ def submit_review_node(state: GenState, session: Session) -> dict:
         score=state.get("qc_score", 0.0),
         dimension_scores=state.get("dimension_scores", {}),
         source="auto",
+        template_version=getattr(template, "version", 1),
+        config_snapshot=state.get("quality_config_snapshot"),
     )
     session.add(record)
     session.commit()
@@ -304,8 +352,12 @@ def human_review_node(state: GenState, session: Session) -> dict:
         score=score,
         dimension_scores={"manual": score},
         source="manual_review",
-        reviewer="human",
+        reviewer=str(decision.get("reviewer_id") or decision.get("reviewer") or "unknown"),
         reason=reason if not approved else None,
+        template_version=getattr(
+            _load_template(session, state["params"]["template_id"]), "version", 1
+        ),
+        config_snapshot=state.get("quality_config_snapshot"),
     )
     session.add(record)
     item.status = "passed" if approved else "rejected"
@@ -395,6 +447,25 @@ def run_generation(
     human_review_config = run_config.get("human_review") or {}
 
     graph = build_graph(session)
+    graph_config = {"configurable": {"thread_id": thread_id}}
+    has_checkpoint = False
+    try:
+        snapshot = graph.get_state(graph_config)
+        has_checkpoint = bool(getattr(snapshot, "values", None))
+    except Exception:  # noqa: BLE001 - observability must not block generation
+        logger.debug("无法读取 workflow checkpoint，按新运行记录", exc_info=True)
+
+    lifecycle_start = time.perf_counter_ns()
+    record_lifecycle_event(
+        trace_id=thread_id,
+        stage="workflow",
+        event="resume" if has_checkpoint else "started",
+        model="langgraph",
+        task_id=task_id,
+        template_id=template_id,
+        tenant_id=params.get("tenant_id"),
+        metadata={"thread_id": thread_id},
+    )
     initial_state: GenState = {
         "task_id": task_id,
         "params": {**params, "template_id": template_id},
@@ -410,7 +481,40 @@ def run_generation(
         "human_review_config": human_review_config,
     }
     # 检查点按 CHECKPOINTER_BACKEND 持久化（PostgresSaver）/ 进程内（MemorySaver）
-    result = graph.invoke(initial_state, config={"configurable": {"thread_id": thread_id}})
+    try:
+        result = graph.invoke(initial_state, config=graph_config)
+    except Exception as exc:  # noqa: BLE001 - record lifecycle failure then preserve error
+        record_lifecycle_event(
+            trace_id=thread_id,
+            stage="workflow",
+            event="failed",
+            model="langgraph",
+            task_id=task_id,
+            template_id=template_id,
+            tenant_id=params.get("tenant_id"),
+            status="failed",
+            reason=str(exc),
+            success=False,
+            latency_ms=elapsed_ms(lifecycle_start),
+            metadata={"thread_id": thread_id},
+        )
+        raise
+
+    interrupted = bool(result.get("__interrupt__"))
+    final_status = "awaiting_review" if interrupted else result.get("status") or "finished"
+    record_lifecycle_event(
+        trace_id=thread_id,
+        stage="workflow",
+        event="finished",
+        model="langgraph",
+        task_id=task_id,
+        template_id=template_id,
+        tenant_id=params.get("tenant_id"),
+        status=final_status,
+        success=final_status not in {"failed", "cancelled"},
+        latency_ms=elapsed_ms(lifecycle_start),
+        metadata={"thread_id": thread_id, "interrupted": interrupted},
+    )
     return result
 
 
@@ -437,8 +541,44 @@ def resume_human_review(thread_id: str, decision: dict, session: Session) -> dic
     依赖持久化 checkpointer（PostgresSaver）：跨进程凭 thread_id 恢复。
     """
     graph = build_graph(session)
-    result = graph.invoke(
-        Command(resume=decision),
-        config={"configurable": {"thread_id": thread_id}},
+    task_id = thread_id.split(":", 1)[0]
+    started = time.perf_counter_ns()
+    record_lifecycle_event(
+        trace_id=thread_id,
+        stage="workflow",
+        event="resume",
+        model="langgraph",
+        task_id=task_id,
+        metadata={"thread_id": thread_id, "resume_type": "human_review"},
+    )
+    try:
+        result = graph.invoke(
+            Command(resume=decision),
+            config={"configurable": {"thread_id": thread_id}},
+        )
+    except Exception as exc:  # noqa: BLE001 - record resume failure then preserve error
+        record_lifecycle_event(
+            trace_id=thread_id,
+            stage="workflow",
+            event="failed",
+            model="langgraph",
+            task_id=task_id,
+            status="failed",
+            reason=str(exc),
+            success=False,
+            latency_ms=elapsed_ms(started),
+            metadata={"thread_id": thread_id, "resume_type": "human_review"},
+        )
+        raise
+    final_status = result.get("status") or "finished"
+    record_lifecycle_event(
+        trace_id=thread_id,
+        stage="workflow",
+        event="finished",
+        model="langgraph",
+        task_id=task_id,
+        status=final_status,
+        latency_ms=elapsed_ms(started),
+        metadata={"thread_id": thread_id, "resume_type": "human_review"},
     )
     return result

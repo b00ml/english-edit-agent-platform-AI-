@@ -1,7 +1,7 @@
 # app/errors.py —— 平台自定义异常
 # 统一异常体系：业务异常继承 PlatformError，携带 status_code 与错误码 code，
 # 由 main.py 的全局异常处理器映射为结构化 HTTP 响应，供前端按 code 分支。
-from typing import Optional
+from typing import Any, List, Optional
 
 
 class PlatformError(Exception):
@@ -23,6 +23,18 @@ class TemplateNotFoundError(PlatformError):
 
     status_code = 404
     code = "TEMPLATE_NOT_FOUND"
+
+
+class InvalidTemplateParamsError(PlatformError):
+    """模板参数校验失败。"""
+
+    status_code = 422
+    code = "INVALID_TEMPLATE_PARAMS"
+
+    def __init__(self, message: str, field_path: List[Any], validation_keyword: str) -> None:
+        super().__init__(message)
+        self.field_path = field_path
+        self.validation_keyword = validation_keyword
 
 
 class StructuredOutputError(PlatformError):
@@ -59,3 +71,24 @@ class DuplicateTaskError(PlatformError):
     def __init__(self, message: str, existing_task_id: str) -> None:
         super().__init__(message)
         self.existing_task_id = existing_task_id
+
+
+class ContentStateConflictError(PlatformError):
+    """内容状态不满足操作前置条件。"""
+
+    status_code = 409
+    code = "CONTENT_STATE_CONFLICT"
+
+
+class TenantScopeDeniedError(PlatformError):
+    """资源不属于当前用户租户。"""
+
+    status_code = 403
+    code = "TENANT_SCOPE_DENIED"
+
+
+class NotFoundError(PlatformError):
+    """资源不存在。"""
+
+    status_code = 404
+    code = "NOT_FOUND"

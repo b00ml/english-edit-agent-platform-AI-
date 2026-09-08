@@ -7,7 +7,9 @@ from typing import List
 import yaml
 from sqlalchemy.orm import Session
 
+from app.audit import record_config_change
 from app.models import QuestionTemplate
+from app.versioning import template_hashes, template_snapshot
 
 # 模板文件目录（相对本文件）
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -111,6 +113,9 @@ def load_all_templates(session: Session) -> int:
         if template is None:
             template = QuestionTemplate(type_id=type_id)
             session.add(template)
+            before_snapshot = None
+        else:
+            before_snapshot = template_snapshot(template)
 
         # 更新字段
         template.name = data["name"]
@@ -121,6 +126,20 @@ def load_all_templates(session: Session) -> int:
         template.gen_prompt = data["gen_prompt"]
         template.run_config = data["run_config"]
         template.status = data.get("status", "enabled")
+        hashes = template_hashes(data)
+        template.template_hash = hashes["template_hash"]
+        template.prompt_hash = hashes["prompt_hash"]
+        template.skill_hash = hashes["skill_hash"]
+        record_config_change(
+            session,
+            entity_type="question_template",
+            entity_id=type_id,
+            action="create" if before_snapshot is None else "sync",
+            actor_id=None,
+            tenant_id=template.tenant_id,
+            before=before_snapshot,
+            after=template_snapshot(template),
+        )
 
         loaded += 1
 

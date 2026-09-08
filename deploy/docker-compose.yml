@@ -17,10 +17,11 @@ services:
     container_name: english-edit-postgres
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: english_edit
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - english-edit-net
     healthcheck:
@@ -49,11 +50,11 @@ services:
     image: langfuse/langfuse:2
     container_name: english-edit-langfuse
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/langfuse
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/langfuse
       NEXTAUTH_URL: http://localhost:3001
-      NEXTAUTH_SECRET: change-me-langfuse-secret
-      SALT: change-me-langfuse-salt
-      ENCRYPTION_KEY: change-me-langfuse-encryption-key
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?LANGFUSE_NEXTAUTH_SECRET must be set}
+      SALT: ${LANGFUSE_SALT:?LANGFUSE_SALT must be set}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY must be set}
       NODE_ENV: production
     ports:
       - "3001:3000"
@@ -71,22 +72,25 @@ services:
       context: ../backend
     container_name: english-edit-backend
     environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/english_edit
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/english_edit
       REDIS_URL: redis://redis:6379/0
       LLM_API_BASE: ${LLM_API_BASE:-https://api.deepseek.com/v1}
-      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY must be set}
       LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-v4-flash}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://ws-66wjvfashe900u6x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://your-embedding-provider.example/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?EMBEDDING_API_KEY must be set}
       EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-text-embedding-v3}
-      JWT_SECRET: ${JWT_SECRET:-change-me-english-edit-jwt-secret}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       JWT_EXPIRE_SECONDS: ${JWT_EXPIRE_SECONDS:-43200}
       SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin123}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD must be set}
       SEED_ADMIN_DISPLAY_NAME: ${SEED_ADMIN_DISPLAY_NAME:-系统管理员}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-postgres}
+      ALLOW_MEMORY_CHECKPOINTER: ${ALLOW_MEMORY_CHECKPOINTER:-false}
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "8000:8000"
@@ -104,22 +108,25 @@ services:
       context: ../backend
     container_name: english-edit-worker
     environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/english_edit
+      DATABASE_URL: postgresql+psycopg2://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/english_edit
       REDIS_URL: redis://redis:6379/0
       LLM_API_BASE: ${LLM_API_BASE:-https://api.deepseek.com/v1}
-      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY must be set}
       LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-v4-flash}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
-      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://ws-66wjvfashe900u6x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://your-embedding-provider.example/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?EMBEDDING_API_KEY must be set}
       EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-text-embedding-v3}
-      JWT_SECRET: ${JWT_SECRET:-change-me-english-edit-jwt-secret}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       JWT_EXPIRE_SECONDS: ${JWT_EXPIRE_SECONDS:-43200}
       SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin123}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD must be set}
       SEED_ADMIN_DISPLAY_NAME: ${SEED_ADMIN_DISPLAY_NAME:-系统管理员}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-postgres}
+      ALLOW_MEMORY_CHECKPOINTER: ${ALLOW_MEMORY_CHECKPOINTER:-false}
     command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=5"]
     depends_on:
       postgres:

@@ -1,7 +1,7 @@
 # 英语教研 AI 内容生成平台 2.0 开发任务清单
 
-> 配套文档：《AI内容生成平台2.0-PRD.md》《AI内容生成平台2.0-技术架构设计.md》《优化记录.md》
-> 版本：V1.1
+> 配套文档：《AI内容生成平台2.0-PRD.md》《AI内容生成平台2.0-技术架构设计.md》《优化记录.md》《优化技术设计3.0.md》
+> 版本：V3.0 设计阶段
 > 技术栈：LangGraph + FastAPI + Pydantic v2 + Celery/Redis + PostgreSQL + Langfuse + React + Docker Compose
 
 ---
@@ -15,6 +15,7 @@
 | P2 质量优化 | 质检校准 + 数据回流 + 微调 | 6 | **5** |
 | P3 平台完善 | Trace 回放 + 成本报表 + 对外化预留 | 5 | **3** |
 | V2.1 优化技术设计 2.0 | 质量闭环合法化 + 可靠性加固（P0×6 + P1×4） | 10 | **10** ✅ |
+| V3.0 优化技术设计 3.0 | 生产一致性 + 安全边界 + 可运维性加固（P0×4 + P1×5 + P2×3） | 12 | **4** |
 
 > 每个任务标注：优先级（P0/P1/P2）、依赖、验收标准。方括号 `[x]` 标记完成状态。
 
@@ -333,6 +334,25 @@ P3: P2 ──→ K1→K2→K3→K4→K5
 
 ---
 
+## 优化技术设计 3.0（生产一致性、安全边界与可运维性加固）
+
+> 设计文档：`docs/优化技术设计3.0.md`（2026-09-07）。以下项目均为待实施设计，不得提前标记为完成。
+
+- [x] **P0-1. 状态机终态与任务统计闭环**（OPT-028）：`reject_node()` 持久化拒绝内容/原因；worker 按 item result 统计；发布仅允许 `passed → published`；新增任务条目结果模型
+- [x] **P0-2. 租户隔离与 viewer 可见性**（OPT-028）：认证上下文推导 tenant；Repository 强制 tenant scope；viewer 仅可见 published；RAG/Trace/通知/样本/成本统一过滤
+- [x] **P0-3. Outbox、唯一幂等和死信**（OPT-028 部分：event_id 幂等键；待批次 B：投递逻辑）：任务与 outbox 同事务；relay 投递；active request_hash 部分唯一索引；dead/replay 管理接口
+- [x] **P0-4. 生产安全基线与工具权限**（OPT-028 部分：生产 fail-fast；待批次 B：工具权限）：生产配置 fail-fast；移除可用默认密钥；工具 allowlist、超时、审计和脱敏
+- [x] **P1-1. API/Service/Repository 分层**（OPT-028/029/030 完成）：拆分 `routes.py` 上帝模块（1257→1196 行），37/37 端点完成重构（100%）。Repository（8 文件）+ Service（8 服务）+ 统一参数命名（`_` → `current_user`）。复杂聚合端点（Cost/Dashboard/Trace）采用务实策略保留原逻辑，避免过度工程化
+- [x] **P1-2. 模板输入与输出 Schema 真校验**（OPT-031）：按 `input_schema` 入口校验；保留数组及对象约束；错误不创建任务
+- [x] **P1-3. 取消、暂停与批量 item 并发**（OPT-032）：取消 API、合作式退出、单 item Celery job、失败分类与指数退避；父任务按 item 结果聚合
+- [x] **P1-4. 可观测性与健康检查**（OPT-032）：live/ready/dependencies 端点；embedding/queue/workflow Trace；递归敏感信息脱敏；生命周期事件可回放
+- [x] **P1-5. 部署、迁移和恢复演练**：Langfuse 数据库初始化、迁移预检查、备份恢复、checkpoint/outbox 重放；脚本与验收步骤见 `docs/P1-5-部署迁移恢复演练.md`。Docker PostgreSQL/Redis、迁移、独立恢复库、PostgresSaver 跨连接恢复及 outbox dead/replay/relay 已实测；真实 LLM 业务 worker kill/restart 演练不作为本个人项目的完成前置条件。
+- [x] **P2-1. 模型档案与模板引用一致性**：启动校验、模型健康、fallback/cooldown 和预算约束；模型档案 API 暴露治理字段
+- [x] **P2-2. 质量闭环可复现性**：审核者身份、质量配置快照、按模板版本/租户/时间窗口统计；`GET /api/quality/stats`
+- [x] **P2-3. 配置和版本治理**：模板/prompt/skill/model hash、任务版本快照、配置变更审计；`GET /api/config-audit`
+
+---
+
 ## 里程碑验收
 
 | 里程碑 | 通过标准 | 状态 |
@@ -365,3 +385,10 @@ P3: P2 ──→ K1→K2→K3→K4→K5
 | V2.4 | 2026-09-05 | OPT-023 改版双生成 Bug 修复（每次改版 2 次 LLM 调用→1 次，质检反馈真实注入）+ OPT-024 灰区 interrupt 人工卡点；全量 175 单测通过 |
 | V2.5 | 2026-09-05 | OPT-025 可测性重构 + 集成测试（真 Postgres）+ CI 覆盖率门槛完成：180 用例全过，覆盖率 81.44%；优化技术设计 2.0 的 P0/P1 全部交付 |
 | V2.6 | 2026-09-06 | OPT-026 交付审查修复：CI 覆盖率门槛接线、GenState 三键显式声明 + 阈值测试盲区消除、温度配置化、lint（black/isort/flake8）全绿 + CI lint job；项目本体初始化独立 git 仓库并分批入库 |
+| V3.0 | 2026-09-07 | 新增《优化技术设计3.0》：生产一致性、安全边界、Outbox/幂等、租户隔离、状态契约与可运维性设计；全部标记为待实施 |
+| V3.1 | 2026-09-08 | 批次 A P0 完成（OPT-028）：状态终态一致性/租户隔离/Outbox幂等键/生产fail-fast；9文件+迁移脚本+19单测全绿 |
+| V2.7 | 2026-09-08 | OPT-031 P1-2 Schema 真校验完成：输入 JSON Schema 校验（422 拦截）、输出约束保留（minItems/maxItems/enum/minLength/maxLength）、去重版本化、双重校验（Pydantic + jsonschema）；210 单测全过，覆盖率 51% |
+
+
+
+

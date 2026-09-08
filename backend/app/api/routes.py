@@ -1,48 +1,39 @@
 # app/api/routes.py —— FastAPI 业务接口
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import PlainTextResponse
-from sqlalchemy import case, func, select
+from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.calibration import (
-    list_calibrations,
-    recalibrate,
-)
+from app.audit import record_config_change
 from app.config import settings
 from app.database import get_db
-from app.dedup import compute_request_hash
-from app.engine.agreement import judge_vs_manual
 from app.engine.metrics import compute_structured_stats
-from app.errors import DuplicateTaskError
+from app.health import dependency_report, readiness_report
 from app.models import (
-    AppNotification,
+    ConfigAuditEvent,
     ContentItem,
     GenerationTask,
-    KnowledgeChunk,
     ModelProfile,
     QualityRecord,
     QuestionTemplate,
-    SamplePool,
     TraceLog,
     User,
 )
-from app.notification import notify_content_rejected
 from app.rag.indexer import index_document
 from app.rag.parser import UnsupportedFileTypeError, parse_file
-from app.rag.retriever import retrieve
 from app.sample_pool import (
     list_samples,
-    pool_item,
-    remove_sample,
-    sync_eligible,
 )
 from app.schemas import (
     CalibrateRequest,
     CalibrationOut,
+    CancelTaskResponse,
+    ConfigAuditOut,
     ContentListOut,
     ContentOut,
     CostByKeyOut,
@@ -55,6 +46,7 @@ from app.schemas import (
     GenerateRequest,
     GenerateResponse,
     HealthOut,
+    HealthReportOut,
     KnowledgeChunkOut,
     KnowledgeListOut,
     KnowledgeRetrieveOut,
@@ -68,6 +60,8 @@ from app.schemas import (
     NotificationOut,
     QualityOut,
     QualityReviewRequest,
+    QualityStatsBucketOut,
+    QualityStatsOut,
     SamplePoolIn,
     SamplePoolListOut,
     SamplePoolOut,
@@ -86,14 +80,22 @@ from app.schemas import (
     UserUpdateIn,
 )
 from app.security import (
-    create_access_token,
     get_current_user,
-    hash_password,
     require_permission,
-    verify_password,
 )
+
+# Service 层导入（P1-1 分层重构）
+from app.services import (
+    AuthService,
+    ContentService,
+    GenerationService,
+    KnowledgeService,
+    NotificationService,
+    QualityService,
+    SampleService,
+)
+from app.versioning import ensure_model_profile_hash, hash_value
 from app.worker.celery_app import celery_app
-from app.workflow.graph import resume_human_review
 
 router = APIRouter()
 
@@ -108,12 +110,8 @@ _ACTIVE_TASK_STATUSES = ("pending", "running")
 @router.post("/api/auth/login", response_model=LoginOut)
 def login(req: LoginIn, db: Session = Depends(get_db)):
     """用户登录：校验用户名密码，成功签发 JWT。"""
-    user = db.query(User).filter(User.username == req.username).first()
-    if user is None or not verify_password(req.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-    if user.status != "active":
-        raise HTTPException(status_code=401, detail="账号已被禁用")
-    return LoginOut(access_token=create_access_token(user), user=user)
+    service = AuthService(db)
+    return service.login(req.username, req.password)
 
 
 @router.get("/api/auth/me", response_model=UserOut)
@@ -130,40 +128,22 @@ def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("user:manage")),
+    current_user: User = Depends(require_permission("user:manage")),
 ):
     """用户列表（分页），仅管理员可访问。"""
-    total = db.query(func.count(User.id)).scalar() or 0
-    users = (
-        db.query(User)
-        .order_by(User.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
-    return UserListOut(total=total, items=users)
+    service = AuthService(db)
+    return service.list_users(page, page_size)
 
 
 @router.post("/api/users", response_model=UserOut)
 def create_user(
     req: UserCreateIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("user:manage")),
+    current_user: User = Depends(require_permission("user:manage")),
 ):
     """创建用户（管理员）。用户名唯一，密码 bcrypt 哈希入库。"""
-    if db.query(User).filter(User.username == req.username).first() is not None:
-        raise HTTPException(status_code=409, detail="用户名已存在")
-    user = User(
-        username=req.username,
-        password_hash=hash_password(req.password),
-        display_name=req.display_name or req.username,
-        role=req.role,
-        status="active",
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
+    service = AuthService(db)
+    return service.create_user(req)
 
 
 @router.patch("/api/users/{user_id}", response_model=UserOut)
@@ -171,23 +151,11 @@ def update_user(
     user_id: str,
     req: UserUpdateIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("user:manage")),
+    current_user: User = Depends(require_permission("user:manage")),
 ):
     """更新用户（管理员）：改显示名/角色/密码/状态。"""
-    user = db.get(User, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="用户不存在")
-    if req.display_name is not None:
-        user.display_name = req.display_name
-    if req.role is not None:
-        user.role = req.role
-    if req.password is not None:
-        user.password_hash = hash_password(req.password)
-    if req.status is not None:
-        user.status = req.status
-    db.commit()
-    db.refresh(user)
-    return user
+    service = AuthService(db)
+    return service.update_user(user_id, req)
 
 
 # ---------------------------------------------------------------------------
@@ -197,54 +165,14 @@ def update_user(
 def create_generate_task(
     req: GenerateRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("generate:create")),
+    current_user: User = Depends(require_permission("generate:create")),
 ):
     """创建生成任务并投递到 Celery 队列。
 
     相同题型+参数且仍在执行中的任务会被去重拦截（返回 409）。
     """
-    # 校验题型模板存在
-    template = (
-        db.query(QuestionTemplate).filter(QuestionTemplate.type_id == req.template_id).first()
-    )
-    if template is None:
-        raise HTTPException(status_code=404, detail="题型模板不存在")
-
-    # 去重：相同题型+规范参数且任务仍在执行中，则拒绝重复提交
-    request_hash = compute_request_hash(req.template_id, req.params)
-    existing = (
-        db.query(GenerationTask)
-        .filter(
-            GenerationTask.request_hash == request_hash,
-            GenerationTask.status.in_(_ACTIVE_TASK_STATUSES),
-        )
-        .first()
-    )
-    if existing is not None:
-        raise DuplicateTaskError(
-            f"相同题型与参数的生成任务已存在（任务 {existing.id}），请勿重复提交",
-            existing.id,
-        )
-
-    task = GenerationTask(
-        template_id=req.template_id,
-        params=req.params,
-        request_hash=request_hash,
-        quantity=req.quantity,
-        status="pending",
-        progress=0.0,
-        tenant_id=req.tenant_id,
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-
-    # 投递到 Celery 队列（异步执行）
-    celery_app.send_task(
-        "app.worker.tasks.process_generation_task",
-        args=[task.id],
-    )
-    return GenerateResponse(task_id=task.id)
+    service = GenerationService(db)
+    return service.create_task(req, current_user, celery_app)
 
 
 # ---------------------------------------------------------------------------
@@ -254,13 +182,46 @@ def create_generate_task(
 def get_task(
     task_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
     """查询单个任务详情与进度。"""
-    task = db.get(GenerationTask, task_id)
-    if task is None:
+    service = GenerationService(db)
+    return service.get_task(task_id)
+
+
+@router.post("/api/tasks/{task_id}/cancel", response_model=CancelTaskResponse)
+def cancel_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("generate:cancel")),
+):
+    """取消待执行或运行中的任务。
+
+    合作式退出：设置 cancel_requested_at 标记，worker 在下一个 item 前检查并退出。
+    已完成的任务不可取消。
+    """
+    from datetime import datetime, timezone
+
+    task = db.query(GenerationTask).filter(GenerationTask.id == task_id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return task
+
+    # 验证状态：仅 pending/dispatched/running 可取消
+    if task.status not in ["pending", "dispatched", "running"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"任务状态为 {task.status}，不可取消（仅 pending/dispatched/running 可取消）",
+        )
+
+    # 设置取消标记
+    task.cancel_requested_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return CancelTaskResponse(
+        task_id=task.id,
+        status=task.status,
+        cancel_requested_at=task.cancel_requested_at,
+    )
 
 
 @router.get("/api/tasks", response_model=TaskListOut)
@@ -268,18 +229,11 @@ def list_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
     """任务列表（分页）。"""
-    total = db.query(func.count(GenerationTask.id)).scalar() or 0
-    tasks = (
-        db.query(GenerationTask)
-        .order_by(GenerationTask.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
-    return TaskListOut(total=total, items=tasks)
+    service = GenerationService(db)
+    return service.list_tasks(page, page_size)
 
 
 # ---------------------------------------------------------------------------
@@ -292,54 +246,39 @@ def list_contents(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
-    """内容检索（可按 template_id / status 筛选）。"""
-    query = select(ContentItem)
-    if template_id:
-        query = query.where(ContentItem.template_id == template_id)
-    if status:
-        query = query.where(ContentItem.status == status)
-    total = db.execute(select(func.count()).select_from(query.subquery())).scalar() or 0
-    rows = (
-        db.execute(
-            query.order_by(ContentItem.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        .scalars()
-        .all()
+    """内容检索（可按 template_id / status 筛选，P0-3 租户隔离）。"""
+    service = ContentService(db)
+    return service.list_contents(
+        current_user=current_user,
+        template_id=template_id,
+        status=status,
+        page=page,
+        page_size=page_size,
     )
-    return ContentListOut(total=total, items=rows)
 
 
 @router.get("/api/contents/{content_id}", response_model=ContentOut)
 def get_content(
     content_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
-    """内容详情。"""
-    item = db.get(ContentItem, content_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="内容不存在")
-    return item
+    """内容详情（P0-3 租户隔离）。"""
+    service = ContentService(db)
+    return service.get_content(content_id, current_user)
 
 
 @router.post("/api/contents/{content_id}/publish", response_model=ContentOut)
 def publish_content(
     content_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:publish")),
+    current_user: User = Depends(require_permission("content:publish")),
 ):
-    """发布内容。"""
-    item = db.get(ContentItem, content_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="内容不存在")
-    item.status = "published"
-    db.commit()
-    db.refresh(item)
-    return item
+    """发布内容（P0-2 状态校验）：仅 passed 可发布，记录操作人与时间。"""
+    service = ContentService(db)
+    return service.publish_content(content_id, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +289,7 @@ def review_content(
     content_id: str,
     req: QualityReviewRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("quality:review")),
+    current_user: User = Depends(require_permission("quality:review")),
 ):
     """人工质检标注：通过/驳回，写入 QualityRecord。
 
@@ -358,48 +297,8 @@ def review_content(
     status=awaiting_review），凭 Command(resume) 恢复图，由 human_review 节点
     完成裁决落库；存量条目走旧路径。
     """
-    item = db.get(ContentItem, content_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="内容不存在")
-
-    # 通过/驳回的评分约定：通过=100，驳回=0
-    score = 100.0 if req.pass_ else 0.0
-
-    if item.thread_id and item.status == "awaiting_review":
-        resume_human_review(
-            item.thread_id,
-            {"approved": req.pass_, "score": score, "reason": req.reason or ""},
-            db,
-        )
-        record = (
-            db.query(QualityRecord)
-            .filter(QualityRecord.item_id == content_id)
-            .filter(QualityRecord.source == "manual_review")
-            .order_by(QualityRecord.created_at.desc())
-            .first()
-        )
-        return record
-
-    record = QualityRecord(
-        item_id=content_id,
-        score=score,
-        dimension_scores={"manual": score},
-        source="manual_review",
-        reviewer="human",
-        reason=req.reason if not req.pass_ else None,
-    )
-    db.add(record)
-
-    # 同步更新内容状态
-    item.status = "passed" if req.pass_ else "rejected"
-    item.qc_score = score
-    db.commit()
-    db.refresh(record)
-
-    # 驳回时生成站内通知
-    if not req.pass_:
-        notify_content_rejected(db, item, req.reason)
-    return record
+    service = QualityService(db)
+    return service.review_content(content_id, req, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -409,55 +308,112 @@ def review_content(
 def calibrate_quality(
     req: CalibrateRequest,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("quality:review")),
+    current_user: User = Depends(require_permission("quality:review")),
 ):
     """触发质检权重校准：用人工驳回样本反向校准 judge 维度权重。
 
     闭环：低分自动改版 → 人工驳回记录 → 假阳性样本 → 计算放水度 → 降权。
     样本不足时写入"样本不足"记录但不改变默认权重。
     """
-    calib = recalibrate(
-        db,
-        req.template_id,
-        alpha=req.alpha,
-        min_samples=req.min_samples,
-        min_fp=req.min_fp,
-    )
-    # 附带：本次校准样本集上 judge 与人工的二值判定一致性（P0-4，只读参考）
-    pairs = _auto_manual_pairs(db, req.template_id)
-    out = CalibrationOut.model_validate(calib)
-    out.agreement = judge_vs_manual(pairs, calib.threshold)
-    return out
-
-
-def _auto_manual_pairs(db: Session, template_id: str) -> list:
-    """收集同 item 的 (auto 总分, manual 分) 标注对（各取该 item 的第一条）。"""
-    rows = (
-        db.query(QualityRecord.item_id, QualityRecord.source, QualityRecord.score)
-        .join(ContentItem, ContentItem.id == QualityRecord.item_id)
-        .filter(ContentItem.template_id == template_id)
-        .filter(QualityRecord.source.in_(["auto", "manual_review"]))
-        .order_by(QualityRecord.item_id, QualityRecord.created_at)
-        .all()
-    )
-    auto: dict = {}
-    manual: dict = {}
-    for item_id, source, score in rows:
-        if source == "auto":
-            auto.setdefault(item_id, float(score))
-        else:
-            manual.setdefault(item_id, float(score))
-    return [(auto[i], manual[i]) for i in auto if i in manual]
+    service = QualityService(db)
+    return service.calibrate(req)
 
 
 @router.get("/api/quality/calibration", response_model=list[CalibrationOut])
 def get_calibrations(
     template_id: str | None = Query(None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """查询校准记录列表（可按模板过滤），按时间倒序。"""
-    return list_calibrations(db, template_id)
+    service = QualityService(db)
+    return service.list_calibrations(template_id)
+
+
+@router.get("/api/quality/stats", response_model=QualityStatsOut)
+def quality_stats(
+    template_id: str | None = Query(None),
+    template_version: int | None = Query(None, ge=1),
+    tenant_id: str | None = Query(None),
+    source: str | None = Query(None, pattern="^(auto|manual_review)$"),
+    start_at: datetime | None = Query(None),
+    end_at: datetime | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("ops:read")),
+):
+    """按模板版本/租户/时间窗口统计质量闭环，避免混用不同配置快照。"""
+    scoped_tenant = current_user.tenant_id if current_user.role != "admin" else tenant_id
+    query = db.query(QualityRecord, ContentItem.template_id).join(
+        ContentItem, ContentItem.id == QualityRecord.item_id
+    )
+    if template_id:
+        query = query.filter(ContentItem.template_id == template_id)
+    if template_version is not None:
+        query = query.filter(QualityRecord.template_version == template_version)
+    if scoped_tenant is not None:
+        query = query.filter(QualityRecord.tenant_id == scoped_tenant)
+    if source:
+        query = query.filter(QualityRecord.source == source)
+    if start_at:
+        query = query.filter(QualityRecord.created_at >= start_at)
+    if end_at:
+        query = query.filter(QualityRecord.created_at < end_at)
+    rows = query.order_by(QualityRecord.created_at.asc()).all()
+    buckets: dict[tuple, dict] = {}
+    for record, item_template_id in rows:
+        snapshot = record.config_snapshot or {}
+        bucket_key = (
+            item_template_id,
+            record.template_version,
+            record.tenant_id,
+            record.source,
+            record.reviewer,
+            hash_value(snapshot),
+        )
+        bucket = buckets.setdefault(
+            bucket_key,
+            {
+                "template_id": item_template_id,
+                "template_version": record.template_version,
+                "tenant_id": record.tenant_id,
+                "source": record.source,
+                "reviewer": record.reviewer,
+                "config_hash": hash_value(snapshot),
+                "effective_threshold": float(
+                    snapshot.get("threshold") or settings.QUALITY_THRESHOLD
+                ),
+                "total": 0,
+                "passed": 0,
+                "rejected": 0,
+                "scores": [],
+            },
+        )
+        threshold = bucket["effective_threshold"]
+        bucket["total"] += 1
+        bucket["passed"] += int(float(record.score) >= threshold)
+        bucket["rejected"] += int(float(record.score) < threshold)
+        bucket["scores"].append(float(record.score))
+    return QualityStatsOut(
+        threshold=settings.QUALITY_THRESHOLD,
+        start_at=start_at,
+        end_at=end_at,
+        buckets=[
+            QualityStatsBucketOut(
+                template_id=value["template_id"],
+                template_version=value["template_version"],
+                tenant_id=value["tenant_id"],
+                source=value["source"],
+                reviewer=value["reviewer"],
+                config_hash=value["config_hash"],
+                effective_threshold=value["effective_threshold"],
+                total=value["total"],
+                passed=value["passed"],
+                rejected=value["rejected"],
+                avg_score=sum(value["scores"]) / len(value["scores"]),
+            )
+            for value in buckets.values()
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +424,7 @@ def cost_aggregation(
     group_by: str = Query("template", pattern="^(template|model|task)$"),
     template_id: str | None = Query(None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """成本聚合：按 题型/模型/任务 维度归并每条 LLM 调用的成本。
 
@@ -556,7 +512,7 @@ def cost_deep_report(
     task_id: str | None = Query(None),
     limit: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """深度成本报表：按 生成/质检 阶段拆分 + 多维（题型/模型/任务）聚合 + 单条下钻。
 
@@ -654,7 +610,7 @@ def cost_deep_report(
 @router.get("/api/dashboard", response_model=DashboardOut)
 def dashboard(
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """指标看板聚合：生产量 / 质检通过率 / 人工驳回率 / 生产周期 / 成本。
 
@@ -913,7 +869,7 @@ def list_traces(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """列出最近的 trace 链路摘要（按 trace_id 去重聚合，最近优先）。
 
@@ -960,7 +916,7 @@ def structured_stats(
     template_id: str | None = Query(None, description="按题型过滤"),
     task_id: str | None = Query(None, description="按任务过滤"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """结构化输出符合率统计（P0-2）。
 
@@ -992,11 +948,12 @@ def structured_stats(
 def get_trace(
     trace_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
-    """按 trace_id 查询完整链路（所有 LLM 调用，按时间升序回放）。
+    """按 trace_id 查询完整链路（所有调用，按时间升序回放）。
 
-    每条记录推断 stage：output_data 含 dimension_scores 视为质检（qc），否则为生成。
+    新记录直接使用 ``TraceLog.stage``，以保留 workflow/queue/embedding 等生命周期
+    事件；仅对历史 stage 为空的记录按旧规则推断 generate/qc。
     """
     rows = (
         db.query(TraceLog)
@@ -1009,7 +966,10 @@ def get_trace(
     result: list[TraceOut] = []
     for r in rows:
         out = TraceOut.model_validate(r)
-        out.stage = "qc" if (r.output_data and "dimension_scores" in r.output_data) else "generate"
+        if not r.stage:
+            out.stage = (
+                "qc" if (r.output_data and "dimension_scores" in r.output_data) else "generate"
+            )
         result.append(out)
     return result
 
@@ -1020,7 +980,7 @@ def get_trace(
 @router.get("/api/templates", response_model=list[TemplateOut])
 def list_templates(
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
     """题型模板列表。"""
     return db.query(QuestionTemplate).order_by(QuestionTemplate.type_id).all()
@@ -1033,13 +993,36 @@ def list_templates(
 def create_model_profile(
     req: ModelProfileIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("template:manage")),
+    current_user: User = Depends(require_permission("template:manage")),
 ):
-    """创建模型档案；若设为默认，则清除其他默认标记。"""
+    """按名称创建或更新模型档案；配置变化写入不可变审计事件。"""
+    before_profile = db.query(ModelProfile).filter(ModelProfile.name == req.name).first()
+    before = _model_profile_snapshot(before_profile) if before_profile else None
     if req.is_default:
-        db.query(ModelProfile).update({ModelProfile.is_default: False})
-    profile = ModelProfile(**req.model_dump())
-    db.add(profile)
+        db.query(ModelProfile).filter(ModelProfile.name != req.name).update(
+            {ModelProfile.is_default: False}, synchronize_session=False
+        )
+    if before_profile is None:
+        profile = ModelProfile(**req.model_dump())
+        db.add(profile)
+        action = "create"
+    else:
+        profile = before_profile
+        for key, value in req.model_dump().items():
+            setattr(profile, key, value)
+        action = "update"
+    ensure_model_profile_hash(profile)
+    db.flush()
+    record_config_change(
+        db,
+        entity_type="model_profile",
+        entity_id=profile.id,
+        action=action,
+        actor_id=current_user.id,
+        tenant_id=profile.tenant_id or current_user.tenant_id,
+        before=before,
+        after=_model_profile_snapshot(profile),
+    )
     db.commit()
     db.refresh(profile)
     return profile
@@ -1048,10 +1031,55 @@ def create_model_profile(
 @router.get("/api/model-profiles", response_model=list[ModelProfileOut])
 def list_model_profiles(
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("content:read")),
+    current_user: User = Depends(require_permission("content:read")),
 ):
     """模型档案列表。"""
     return db.query(ModelProfile).order_by(ModelProfile.name).all()
+
+
+def _model_profile_snapshot(profile: ModelProfile | None) -> dict | None:
+    """返回不含运行时健康计数的模型配置快照。"""
+    if profile is None:
+        return None
+    return {
+        "name": profile.name,
+        "provider": profile.provider,
+        "model_name": profile.model_name,
+        "model_hash": profile.model_hash,
+        "cost_tier": profile.cost_tier,
+        "is_default": profile.is_default,
+        "status": profile.status,
+        "max_fallbacks": profile.max_fallbacks,
+        "budget_per_task": profile.budget_per_task,
+        "tenant_id": profile.tenant_id,
+    }
+
+
+@router.get("/api/config-audit", response_model=list[ConfigAuditOut])
+def list_config_audit(
+    entity_type: str | None = Query(None),
+    entity_id: str | None = Query(None),
+    tenant_id: str | None = Query(None),
+    start_at: datetime | None = Query(None),
+    end_at: datetime | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("ops:read")),
+):
+    """查询模板/模型配置变更；非管理员只能查看自身租户事件。"""
+    scoped_tenant = current_user.tenant_id if current_user.role != "admin" else tenant_id
+    query = db.query(ConfigAuditEvent)
+    if entity_type:
+        query = query.filter(ConfigAuditEvent.entity_type == entity_type)
+    if entity_id:
+        query = query.filter(ConfigAuditEvent.entity_id == entity_id)
+    if scoped_tenant is not None:
+        query = query.filter(ConfigAuditEvent.tenant_id == scoped_tenant)
+    if start_at:
+        query = query.filter(ConfigAuditEvent.created_at >= start_at)
+    if end_at:
+        query = query.filter(ConfigAuditEvent.created_at < end_at)
+    return query.order_by(ConfigAuditEvent.created_at.desc()).limit(limit).all()
 
 
 # ---------------------------------------------------------------------------
@@ -1063,30 +1091,24 @@ def list_notifications(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """站内通知列表（分页），可只看未读，返回未读总数。"""
-    query = db.query(AppNotification)
-    if unread_only:
-        query = query.filter(AppNotification.is_read.is_(False))
-    unread = db.query(AppNotification).filter(AppNotification.is_read.is_(False)).count()
-    total = query.count()
-    rows = (
-        query.order_by(AppNotification.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
-    return NotificationListOut(total=total, unread=unread, items=rows)
+    service = NotificationService(db)
+    skip = (page - 1) * page_size
+    result = service.list_notifications(current_user, skip=skip, limit=page_size)
+    unread = service.get_unread_count(current_user)
+    return NotificationListOut(total=result["total"], unread=unread, items=result["items"])
 
 
 @router.get("/api/notifications/unread-count", response_model=UnreadCountOut)
 def unread_notification_count(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """未读通知数（供前端角标）。"""
-    count = db.query(AppNotification).filter(AppNotification.is_read.is_(False)).count()
+    service = NotificationService(db)
+    count = service.get_unread_count(current_user)
     return UnreadCountOut(count=count)
 
 
@@ -1094,26 +1116,22 @@ def unread_notification_count(
 def mark_notification_read(
     notification_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """标记单条通知已读。"""
-    row = db.get(AppNotification, notification_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="通知不存在")
-    row.is_read = True
-    db.commit()
-    db.refresh(row)
-    return row
+    service = NotificationService(db)
+    result = service.mark_as_read(notification_id, current_user)
+    return NotificationOut(**result)
 
 
 @router.post("/api/notifications/read-all", response_model=UnreadCountOut)
 def mark_all_notifications_read(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """标记全部通知已读。"""
-    db.query(AppNotification).update({AppNotification.is_read: True})
-    db.commit()
+    service = NotificationService(db)
+    service.mark_all_as_read(current_user)
     return UnreadCountOut(count=0)
 
 
@@ -1124,27 +1142,19 @@ def mark_all_notifications_read(
 def upload_knowledge(
     req: KnowledgeUploadIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """上传一份资料（教材/课标/真题）并分块向量化入库。"""
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="文本内容不能为空")
-    chunks = index_document(
-        db,
+    service = KnowledgeService(db)
+    result = service.upload_text(
+        text=req.text,
         source_type=req.source_type,
         source_name=req.source_name,
-        text=req.text,
         knowledge_point=req.knowledge_point,
         meta=req.meta,
+        user=current_user,
     )
-    if chunks == 0:
-        raise HTTPException(status_code=400, detail="分块失败，文本可能为空或过短")
-    return KnowledgeUploadOut(
-        chunks=chunks,
-        source_type=req.source_type,
-        source_name=req.source_name,
-        knowledge_point=req.knowledge_point,
-    )
+    return KnowledgeUploadOut(**result)
 
 
 # 上传文件大小上限（10 MB），防止异常大文件拖垮 embedding
@@ -1157,7 +1167,7 @@ def upload_knowledge_file(
     source_type: str = Form("真题"),
     knowledge_point: str | None = Form(None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """上传教研文档（txt/md/docx/pdf）并解析、分块向量化入库。
 
@@ -1205,25 +1215,19 @@ def list_knowledge(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """知识分块列表（分页，可按资料类型过滤）。"""
-    stmt = select(KnowledgeChunk)
-    if source_type:
-        stmt = stmt.where(KnowledgeChunk.source_type == source_type)
-    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
-    rows = (
-        db.execute(
-            stmt.order_by(KnowledgeChunk.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        .scalars()
-        .all()
+    service = KnowledgeService(db)
+    result = service.list_knowledge(
+        source_type=source_type,
+        page=page,
+        page_size=page_size,
+        user=current_user,
     )
     return KnowledgeListOut(
-        total=total,
-        items=[KnowledgeChunkOut.model_validate(r) for r in rows],
+        total=result["total"],
+        items=[KnowledgeChunkOut.model_validate(r) for r in result["items"]],
     )
 
 
@@ -1231,15 +1235,12 @@ def list_knowledge(
 def delete_knowledge(
     chunk_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """删除一条知识分块。"""
-    row = db.get(KnowledgeChunk, chunk_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="分块不存在")
-    db.delete(row)
-    db.commit()
-    return {"deleted": chunk_id}
+    service = KnowledgeService(db)
+    result = service.delete_knowledge(chunk_id=chunk_id, user=current_user)
+    return result
 
 
 @router.get("/api/knowledge/retrieve", response_model=KnowledgeRetrieveOut)
@@ -1248,11 +1249,17 @@ def retrieve_knowledge(
     knowledge_point: str | None = None,
     top_k: int = Query(3, ge=1, le=10),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """向量检索最相关的知识分块，供调试与人工查看。"""
-    snippets = retrieve(db, query=query, knowledge_point=knowledge_point, top_k=top_k)
-    return KnowledgeRetrieveOut(query=query, snippets=snippets)
+    service = KnowledgeService(db)
+    result = service.retrieve_knowledge(
+        query=query,
+        knowledge_point=knowledge_point,
+        top_k=top_k,
+        user=current_user,
+    )
+    return KnowledgeRetrieveOut(**result)
 
 
 # ---------------------------------------------------------------------------
@@ -1262,27 +1269,28 @@ def retrieve_knowledge(
 def create_sample(
     req: SamplePoolIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """将一条高质量内容沉淀为回流样本（few-shot/微调语料）。"""
-    item = db.get(ContentItem, req.content_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="内容不存在")
-    if item.status not in ("passed", "published"):
-        raise HTTPException(status_code=400, detail="仅人工通过或已发布的内容可沉淀为样本")
-    sample = pool_item(db, item, source=req.source, purpose=req.purpose)
+    service = SampleService(db)
+    sample = service.create_sample_from_content(
+        content_id=req.content_id,
+        source=req.source,
+        purpose=req.purpose,
+        user=current_user,
+    )
     return sample
 
 
 @router.post("/api/samples/sync", response_model=SampleSyncOut)
 def sync_samples(
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """自动将全部高质量内容（人工通过/已发布）沉淀为样本，幂等。"""
-    added = sync_eligible(db)
-    total = db.query(func.count(SamplePool.id)).scalar() or 0
-    return SampleSyncOut(added=added, total=total)
+    service = SampleService(db)
+    result = service.sync_samples(user=current_user)
+    return SampleSyncOut(added=result["added"], total=result["total"])
 
 
 @router.get("/api/samples", response_model=SamplePoolListOut)
@@ -1294,17 +1302,18 @@ def list_samples_api(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """回流样本检索（可按 题型/知识点/用途/来源 过滤，分页）。"""
-    rows, total = list_samples(
-        db,
+    service = SampleService(db)
+    rows, total = service.list_samples_filtered(
         template_id=template_id,
         knowledge_point=knowledge_point,
         purpose=purpose,
         source=source,
         page=page,
         page_size=page_size,
+        user=current_user,
     )
     return SamplePoolListOut(total=total, items=rows)
 
@@ -1316,7 +1325,7 @@ def export_samples(
     purpose: str | None = Query(None),
     source: str | None = Query(None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:read")),
+    current_user: User = Depends(require_permission("ops:read")),
 ):
     """导出回流样本为 JSONL（few-shot/微调语料，每行一条样本）。"""
     rows, _ = list_samples(
@@ -1351,12 +1360,12 @@ def export_samples(
 def delete_sample(
     sample_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_permission("ops:write")),
+    current_user: User = Depends(require_permission("ops:write")),
 ):
     """从回流样本库中移除一条样本。"""
-    if not remove_sample(db, sample_id):
-        raise HTTPException(status_code=404, detail="样本不存在")
-    return {"deleted": sample_id}
+    service = SampleService(db)
+    result = service.delete_sample_by_id(sample_id=sample_id, user=current_user)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1366,3 +1375,27 @@ def delete_sample(
 def health_check():
     """健康检查。"""
     return HealthOut(status="ok")
+
+
+@router.get("/api/health/live", response_model=HealthOut)
+def health_live():
+    """进程存活探针：不访问数据库、Redis 或模型服务。"""
+    return HealthOut(status="ok")
+
+
+@router.get("/api/health/ready", response_model=HealthReportOut)
+def health_ready():
+    """服务就绪探针：关键依赖不可用时返回 503。"""
+    report = readiness_report()
+    response = HealthReportOut(**report)
+    if not response.ready:
+        return JSONResponse(status_code=503, content=response.model_dump())
+    return response
+
+
+@router.get("/api/health/dependencies", response_model=HealthReportOut)
+def health_dependencies(
+    current_user: User = Depends(require_permission("ops:read")),
+):
+    """运营依赖详情，仅管理员/教研员可见，响应不包含密钥。"""
+    return HealthReportOut(**dependency_report())

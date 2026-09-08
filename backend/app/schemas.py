@@ -31,6 +31,9 @@ class ModelProfileIn(BaseModel):
     model_name: str
     cost_tier: str = "standard"
     is_default: bool = False
+    status: str = Field(default="enabled", pattern="^(enabled|disabled)$")
+    max_fallbacks: int = Field(default=1, ge=0, le=20)
+    budget_per_task: Optional[float] = Field(default=None, ge=0)
     tenant_id: Optional[str] = None
 
 
@@ -144,10 +147,56 @@ class ModelProfileOut(ORMSchema):
     name: str
     provider: str
     model_name: str
+    model_hash: Optional[str] = None
     cost_tier: str
     is_default: bool
+    status: str
+    health_status: str
+    failure_count: int
+    cooldown_until: Optional[datetime] = None
+    max_fallbacks: int
+    budget_per_task: Optional[float] = None
     tenant_id: Optional[str] = None
     created_at: datetime
+
+
+class ConfigAuditOut(ORMSchema):
+    """配置变更审计事件响应。"""
+
+    id: str
+    entity_type: str
+    entity_id: str
+    action: str
+    actor_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    before_snapshot: Optional[Dict[str, Any]] = None
+    after_snapshot: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+
+class QualityStatsBucketOut(BaseModel):
+    """按模板版本、租户、来源和审核者拆分的质检统计。"""
+
+    template_id: Optional[str] = None
+    template_version: Optional[int] = None
+    tenant_id: Optional[str] = None
+    source: str
+    reviewer: Optional[str] = None
+    config_hash: str
+    effective_threshold: float
+    total: int
+    passed: int
+    rejected: int
+    avg_score: float
+
+
+class QualityStatsOut(BaseModel):
+    """质量闭环统计结果及其实际查询口径。"""
+
+    threshold: float
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    buckets: List[QualityStatsBucketOut]
 
 
 class TemplateOut(ORMSchema):
@@ -331,10 +380,37 @@ class GenerateResponse(BaseModel):
     status: str = "pending"
 
 
+class CancelTaskResponse(BaseModel):
+    """取消任务响应。"""
+
+    task_id: str
+    status: str
+    cancel_requested_at: datetime
+    message: str = "取消请求已提交，运行中的 item 将在当前批次完成后停止"
+
+
 class HealthOut(BaseModel):
     """健康检查响应。"""
 
     status: str = "ok"
+
+
+class HealthDependencyOut(BaseModel):
+    """健康探针响应；detail 只允许状态摘要，不包含密钥。"""
+
+    name: str
+    status: str
+    latency_ms: float
+    detail: str | None = None
+
+
+class HealthReportOut(BaseModel):
+    """依赖健康汇总响应。"""
+
+    status: str
+    ready: bool | None = None
+    blocking: List[str] = Field(default_factory=list)
+    dependencies: List[HealthDependencyOut]
 
 
 # ---------------------------------------------------------------------------

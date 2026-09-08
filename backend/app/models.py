@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -40,6 +41,9 @@ class QuestionTemplate(Base):
     type_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    template_hash: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    skill_hash: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
     input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False)
     output_schema: Mapped[dict] = mapped_column(JSONB, nullable=False)
     quality_rules: Mapped[list] = mapped_column(JSONB, nullable=False)
@@ -80,6 +84,9 @@ class GenerationTask(Base):
     progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     trace_ref: Mapped[str] = mapped_column(String(128), nullable=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
+    result_summary: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    version_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    cancel_requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -88,6 +95,68 @@ class GenerationTask(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class GenerationTaskItem(Base):
+    """单个子任务条目：记录 thread_id、状态、失败原因、重试次数。"""
+
+    __tablename__ = "generation_task_item"
+    __table_args__ = (
+        UniqueConstraint("task_id", "item_index", name="uq_generation_task_item_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("generation_task.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    content_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("content_item.id", ondelete="SET NULL"), nullable=True
+    )
+    failure_code: Mapped[str] = mapped_column(String(64), nullable=True)
+    failure_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TaskOutbox(Base):
+    """任务投递 Outbox：任务事务提交后由 relay 投递到 Celery。"""
+
+    __tablename__ = "task_outbox"
+    __table_args__ = (UniqueConstraint("event_id", name="uq_task_outbox_event_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("generation_task.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    item_id: Mapped[str] = mapped_column(String(36), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    last_error: Mapped[str] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -112,6 +181,10 @@ class ContentItem(Base):
     # LangGraph 图线程 ID（thread_id=task:idx）；awaiting_review 条目凭此恢复裁决
     thread_id: Mapped[str] = mapped_column(String(128), nullable=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
+    failure_code: Mapped[str] = mapped_column(String(64), nullable=True)
+    failure_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    published_by: Mapped[str] = mapped_column(String(36), nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -140,6 +213,8 @@ class QualityRecord(Base):
     reviewer: Mapped[str] = mapped_column(String(64), nullable=True)
     # 人工驳回原因（仅 manual_review 且驳回时填写，供反向校准分析）
     reason: Mapped[str] = mapped_column(Text, nullable=True)
+    template_version: Mapped[int] = mapped_column(Integer, nullable=True)
+    config_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -158,8 +233,16 @@ class ModelProfile(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_hash: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
     cost_tier: Mapped[str] = mapped_column(String(32), nullable=False, default="standard")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="enabled")
+    health_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unknown")
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cooldown_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_health_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_fallbacks: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    budget_per_task: Mapped[float] = mapped_column(Float, nullable=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -219,10 +302,32 @@ class AppNotification(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     # 关联对象（生成任务或缺值内容条目）
     related_id: Mapped[str] = mapped_column(String(36), nullable=True, index=True)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=True, unique=True)
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12. 配置变更审计表（P2-3）
+# ---------------------------------------------------------------------------
+class ConfigAuditEvent(Base):
+    """模板/模型等可运行配置的不可变变更记录。"""
+
+    __tablename__ = "config_audit_event"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    before_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    after_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
 
 

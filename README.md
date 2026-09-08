@@ -83,13 +83,24 @@ english-edit/
 
 ### 2. 配置环境变量
 
-在项目根目录创建 `.env`（可从 `deploy/docker-compose.yml` 的 `${VAR:-默认值}` 对照填写）：
+在项目根目录创建 `.env`（建议从 `.env.example` 复制）。Compose 会对数据库密码、JWT、管理员密码、LLM/Embedding Key 和 Langfuse secret 做启动前必填校验；不要把示例占位值直接用于生产。
 
 ```env
 # 必填：LLM API
 LLM_API_BASE=https://api.deepseek.com/v1
 LLM_API_KEY=你的密钥
 LLM_MODEL_NAME=deepseek-v4-flash
+
+# 生产必填：数据库 / JWT / 管理员 / Langfuse secret
+POSTGRES_PASSWORD=替换为随机数据库密码
+JWT_SECRET=替换为至少 32 字节随机值
+SEED_ADMIN_PASSWORD=替换为随机管理员密码
+LANGFUSE_NEXTAUTH_SECRET=替换为随机值
+LANGFUSE_SALT=替换为随机值
+LANGFUSE_ENCRYPTION_KEY=替换为 32 字节密钥
+ENVIRONMENT=production
+CHECKPOINTER_BACKEND=postgres
+ALLOW_MEMORY_CHECKPOINTER=false
 
 # 可选：RAG embedding（阿里云百炼 text-embedding-v3）
 EMBEDDING_API_BASE=https://ws-xxx.maas.aliyuncs.com/compatible-mode/v1
@@ -115,6 +126,8 @@ docker compose -f deploy/docker-compose.yml up -d --build
 | Langfuse | http://localhost:3001 |
 
 后端容器启动时自动执行 `alembic upgrade head` 迁移建表。
+
+生产启动若缺少上述必填变量会在 Compose 插值阶段失败；即使配置了变量，`ENVIRONMENT=production` 仍会拒绝默认 JWT secret、默认管理员密码和缺失的 LLM/Embedding Key。
 
 ### 4. 常用命令
 
@@ -156,6 +169,8 @@ python -m pytest -q -o addopts=""
 > 说明：本机若未安装 pytest-cov，需用 `-o addopts=""` 跳过默认 coverage 选项。
 
 ### 前端
+
+本地前端构建要求 Node.js 22+（Vite 8）。
 
 ```bash
 cd frontend
@@ -202,6 +217,7 @@ npm run build
 | GET | `/api/quality` / POST `/api/quality/{id}/review` | 质检记录 / 人工标注 |
 | POST | `/api/quality/calibrate` | 触发质检权重校准（J1 闭环） |
 | GET | `/api/quality/calibration` | 查询校准记录 |
+| GET | `/api/quality/stats` | 按模板版本 / 租户 / 审核者 / 时间窗口统计质量 |
 | GET | `/api/costs` / `/api/costs/deep` | 成本聚合 / 深度成本报表 |
 | POST | `/api/samples` `/api/samples/sync` | 样本沉淀 / 自动同步 |
 | GET | `/api/samples` / `/api/samples/export` | 样本检索 / JSONL 导出 |
@@ -213,8 +229,9 @@ npm run build
 | DELETE | `/api/knowledge/{id}` | 删除知识分块 |
 | GET | `/api/knowledge/retrieve` | 检索知识片段 |
 | GET | `/api/notifications` | 站内通知 |
+| GET | `/api/config-audit` | 查询模板 / 模型配置变更审计 |
 | GET/POST/PATCH | `/api/users` | 用户管理（admin） |
-| GET | `/api/health` | 健康检查 |
+| GET | `/api/health` / `/api/health/ready` | 存活与依赖就绪检查 |
 
 ---
 
@@ -224,6 +241,19 @@ npm run build
 - [技术架构设计](docs/AI内容生成平台2.0-技术架构设计.md)
 - [开发任务清单](docs/tasks.md)
 - [优化记录与成果追踪](docs/优化记录.md)
+- [P1-5 部署、迁移和恢复演练](docs/P1-5-部署迁移恢复演练.md)
+- [优化技术设计 3.0](docs/优化技术设计3.0.md)
+- [面试准备 - Agent 项目深度拷打与踩坑复盘](docs/面试准备-Agent项目深度拷打与踩坑复盘.md)
+- [GitHub 开源发布检查清单](docs/开源发布检查清单.md)
+
+## 已验证的工程证据
+
+- 非集成测试：`240 passed, 5 deselected`。
+- Docker PostgreSQL/Redis 健康检查、Langfuse 独立数据库初始化、`alembic upgrade head`、`pg_dump/pg_restore` 独立恢复库已验证。
+- 迁移当前 revision 与 head 均为 `m3_03_model_hash`；恢复库未覆盖源库。
+- 恢复演练入口：`python scripts/recovery_drill.py --phase checkpoint-start|checkpoint-resume|outbox`（详见 P1-5 文档）。
+- 模型路由具备 fallback、cooldown、失败计数和任务预算限制；任务通过 `trace_id` 关联 LLM、embedding、workflow、queue 生命周期。
+- 尚未宣称的边界：运行中 worker kill/restart 后的真实 PostgresSaver checkpoint 恢复，以及 Celery dead outbox 在线重放，需在带 worker/checkpointer 的部署环境执行。
 
 ---
 
@@ -235,6 +265,17 @@ npm run build
 - 每次 LLM 调用带 `trace_id`，记录模型 / 输入输出 / 耗时 / 成本 / token
 - 每次代码改动在 `docs/优化记录.md` 追加 `OPT-0XX` 记录，并同步 `docs/tasks.md`
 
+## 开源边界
+
+- 这是一个个人实现的教学/求职项目，不代表生产可用 SaaS。
+- 已验证内容以仓库文档和测试结果为准；未验证的生产语义会明确标注。
+- 如果你复用本项目，请先检查模型 API、数据库和向量库配置。
+
+## 已知发布前风险
+
+- 前端依赖已升级至 Vite 8.2.2、React Router 7.18.3 和 Node 22 构建链；npm audit 结果为 0 vulnerabilities。
+- 任务投递、request_hash 并发唯一性和全量多租户 scope 仍有边界，详见 Agent 项目深度拷打与踩坑复盘。
+
 ## License
 
-内部项目，保留所有权利。
+MIT License，见 [LICENSE](LICENSE)。
