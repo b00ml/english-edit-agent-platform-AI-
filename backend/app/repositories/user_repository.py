@@ -22,10 +22,6 @@ class UserRepository(BaseRepository[User]):
         """根据用户名查询。"""
         return self.db.query(User).filter(User.username == username).first()
 
-    def get_by_email(self, email: str) -> Optional[User]:
-        """根据邮箱查询。"""
-        return self.db.query(User).filter(User.email == email).first()
-
     def list_by_role(self, role: str, skip: int = 0, limit: int = 100) -> List[User]:
         """按角色查询用户。"""
         return self.db.query(User).filter(User.role == role).offset(skip).limit(limit).all()
@@ -43,7 +39,3 @@ class UserRepository(BaseRepository[User]):
     def exists_username(self, username: str) -> bool:
         """检查用户名是否存在。"""
         return self.db.query(User.id).filter(User.username == username).first() is not None
-
-    def exists_email(self, email: str) -> bool:
-        """检查邮箱是否存在。"""
-        return self.db.query(User.id).filter(User.email == email).first() is not None

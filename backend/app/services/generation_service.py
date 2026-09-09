@@ -103,6 +103,7 @@ class GenerationService:
             quantity=req.quantity,
             status="pending",
             progress=0.0,
+            user_id=current_user.id,
             tenant_id=current_user.tenant_id,
             version_snapshot=task_version_snapshot_with_model(template, profile),
         )

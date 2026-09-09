@@ -83,6 +83,10 @@ class GenerationTask(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     trace_ref: Mapped[str] = mapped_column(String(128), nullable=True)
+    # 创建任务的用户；保留 nullable 兼容历史任务
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=True)
     result_summary: Mapped[dict] = mapped_column(JSONB, nullable=True)
     version_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=True)

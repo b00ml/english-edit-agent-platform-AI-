@@ -330,7 +330,7 @@ P3: P2 ──→ K1→K2→K3→K4→K5
 - [x] **P1-2. Judge 独立模型配置**（OPT-021）：`JUDGE_MODEL_NAME` 全局 + 模板级 `judge_model` 覆盖（自偏好偏差治理）
 - [x] **P1-3. 分模型价目表**（OPT-022）：`MODEL_PRICES` JSON 配置，`compute_cost` 按模型计价，未命中回退全局单价
 - [x] **P1-1. LangGraph interrupt 人工卡点**（OPT-024，附 OPT-023 改版双生成 Bug 修复）：灰区转人工（模板级开关），`submit_review`+`human_review` 两节点 + `resume_human_review`（依赖 P0-3）
-- [x] **P1-4. 集成测试 + CI**（OPT-025，CI 失败修复见 OPT-039）：可测性重构（`_get_openai_client` 缝）、`tests/integration/`（真 Postgres，5 用例）、GitHub Actions 双 job（覆盖率门槛 80%）
+- [x] **P1-4. 集成测试 + CI**（OPT-025，CI 失败修复见 OPT-039/OPT-040）：可测性重构（`_get_openai_client` 缝）、`tests/integration/`（真 Postgres，5 用例）、GitHub Actions 双 job（覆盖率门槛 80%）
 
 ---
 

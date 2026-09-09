@@ -251,12 +251,12 @@ class TraceRepository(BaseRepository[TraceLog]):
             or 0
         )
 
-        # 重试数（假设 error 不为空表示重试）
+        # 重试数：失败尝试以 success=False 落库；TraceLog 没有独立 error 列。
         retry = (
             self.db.query(func.count(TraceLog.id))
             .filter(TraceLog.tenant_id == tenant_id)
             .filter(TraceLog.stage == "generate")
-            .filter(TraceLog.error.is_not(None))
+            .filter(TraceLog.success.is_(False))
             .scalar()
             or 0
         )

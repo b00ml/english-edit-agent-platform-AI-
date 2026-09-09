@@ -59,3 +59,12 @@ addopts = "-q --cov=app --cov-report=term-missing"
 markers = [
     "integration: 需要真实 Postgres 的集成测试（设 TEST_DATABASE_URL 后运行 tests/integration）",
 ]
+
+[tool.coverage.run]
+# 工作区中保留的历史重构/备份副本不属于运行时模块，不应稀释生产代码覆盖率。
+omit = [
+    "app/api/routes_original.py",
+    "app/api/routes_refactored.py",
+    "app/api/routes_step*.py",
+    "app/worker/tasks_backup.py",
+]

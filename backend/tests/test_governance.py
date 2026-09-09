@@ -73,7 +73,7 @@ def test_validate_template_model_references_reports_missing_profiles() -> None:
 
 def test_manual_heads_handles_multiline_merge_revision() -> None:
     versions_dir = Path(__file__).parents[1] / "alembic" / "versions"
-    assert _manual_heads(versions_dir) == ["m3_03_model_hash"]
+    assert _manual_heads(versions_dir) == ["m3_04_task_user_id"]
 
 
 def test_migration_precheck_adds_backend_root_for_direct_script_execution() -> None:
