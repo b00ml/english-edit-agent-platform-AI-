@@ -17,6 +17,7 @@ langchain-openai
 openai>=1.55.3
 langfuse
 pyyaml
+jsonschema
 pgvector
 python-docx
 pypdf

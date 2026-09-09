@@ -102,6 +102,7 @@ jobs:
           --health-retries 10
     env:
       PYTHONPATH: .
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/english_edit_test
       TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/english_edit_test
       # interrupt 恢复在同进程内验证（PostgresSaver 降级逻辑由单测覆盖）
       CHECKPOINTER_BACKEND: memory
