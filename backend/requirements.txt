@@ -23,4 +23,4 @@ python-docx
 pypdf
 PyJWT
 passlib[bcrypt]
-bcrypt==4.2.1
+bcrypt==5.0.0
